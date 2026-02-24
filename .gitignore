@@ -209,3 +209,6 @@ __marimo__/
 # Agent evaluation workspaces and metadata
 workspaces/
 .*_meta/
+
+# Claude Code
+.claude/
