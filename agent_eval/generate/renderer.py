@@ -1,6 +1,5 @@
 """Orchestrator: ties all modules together to generate prompt files."""
 
-import os
 from pathlib import Path
 
 from .fetcher import (
@@ -9,6 +8,7 @@ from .fetcher import (
     is_url,
     parse_pr_url,
     parse_repo_url,
+    validate_repo_pr_match,
 )
 from .patch_parser import extract_files_from_patch
 from .simplifier import rewrite_problem_statement, simplify_problem_statement
@@ -22,7 +22,7 @@ def resolve_output_dir(repo_url: str, output_dir: str | None) -> Path:
     repo_name = parse_repo_url(repo_url)
     # Capitalize each segment (e.g., "triton-ascend" -> "Triton-Ascend")
     project_name = "-".join(seg.capitalize() for seg in repo_name.split("-"))
-    return Path("Prompts") / project_name
+    return Path("prompt_variants") / project_name
 
 
 def resolve_pr_number(pr_url: str) -> str:
@@ -31,58 +31,49 @@ def resolve_pr_number(pr_url: str) -> str:
     return pr_number
 
 
-def load_problem_statement(problem_statement_arg: str | None, pr_url: str) -> str:
-    """Get the problem statement from argument (text or file) or fetch from PR."""
-    if problem_statement_arg:
-        if os.path.isfile(problem_statement_arg):
-            with open(problem_statement_arg, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        return problem_statement_arg
-    print("No --problem-statement provided, fetching from PR...")
-    return fetch_pr_description(pr_url)
-
-
 def load_patch(patch_arg: str) -> str:
     """Load patch content from a file path or URL."""
     if is_url(patch_arg):
         print(f"Downloading patch from {patch_arg}...")
         return fetch_patch_from_url(patch_arg)
-    if not os.path.isfile(patch_arg):
+    p = Path(patch_arg)
+    if not p.is_file():
         raise FileNotFoundError(f"Patch file not found: {patch_arg}")
-    with open(patch_arg, "r", encoding="utf-8") as f:
-        return f.read()
+    return p.read_text(encoding="utf-8")
 
 
 def run(
     repo_url: str,
     pr_url: str,
     patch: str,
-    problem_statement: str | None = None,
     output_dir: str | None = None,
 ) -> Path:
     """Main pipeline: generate v1, v2, v3 prompt files.
 
     Returns the output directory path.
     """
-    # 1. Get original problem statement
-    original_ps = load_problem_statement(problem_statement, pr_url)
+    # 0. Validate & cross-check URLs, then load patch — fail fast before LLM calls
+    validate_repo_pr_match(repo_url, pr_url)
+    patch_text = load_patch(patch)
+
+    # 1. Fetch problem statement from the PR
+    print("Fetching problem statement from PR...")
+    original_ps = fetch_pr_description(pr_url)
     print(f"Original problem statement loaded ({len(original_ps)} chars).")
 
-    # 2. Load and parse patch
-    patch_text = load_patch(patch)
+    # 2. Parse patch for file list
     files = extract_files_from_patch(patch_text)
     print(f"Extracted {len(files)} file(s) from patch.")
     if not files:
         print("Warning: no files extracted from patch. v3 will have an empty file list.")
 
     # 3. Rewrite problem statement via LLM (original + patch -> detailed v1)
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    print(f"Rewriting problem statement via {provider} API...")
+    print("Rewriting problem statement via LLM...")
     rewritten = rewrite_problem_statement(original_ps, patch_text)
     print(f"Rewritten problem statement generated ({len(rewritten)} chars).")
 
     # 4. Generate simplified statement via LLM (rewritten -> vague v2)
-    print(f"Generating simplified problem statement (v2) via {provider} API...")
+    print("Generating simplified problem statement (v2) via LLM...")
     simplified = simplify_problem_statement(rewritten)
     print("Simplified statement generated.")
 

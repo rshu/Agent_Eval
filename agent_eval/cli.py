@@ -1,41 +1,62 @@
-"""Command-line interface for agent_eval prompt generator."""
+"""Command-line interface for agent-eval: generate, run, and evaluate modes."""
 
 import argparse
 import sys
 
-from .renderer import run
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agent_eval",
-        description="Generate v1/v2/v3 prompt files for Agent_Eval benchmarks.",
+        prog="agent-eval",
+        description="Generate, run, and evaluate coding agent benchmarks.",
     )
     parser.add_argument(
-        "--repo-url",
+        "--mode",
         required=True,
-        help="Repository URL (GitHub or Gitee)",
+        choices=["generate", "run", "evaluate"],
+        help="Operation mode",
     )
-    parser.add_argument(
-        "--pr-url",
-        required=True,
-        help="Pull request URL",
+
+    # ── Generate mode arguments ──
+    gen = parser.add_argument_group("generate mode")
+    gen.add_argument("--repo-url", help="Repository URL (GitHub or Gitee)")
+    gen.add_argument("--pr-url", help="Pull request URL")
+    gen.add_argument("--patch", help="Path to a local .patch file or a URL to download one")
+    gen.add_argument(
+        "--output-dir", default=None,
+        help="Output directory (default: prompt_variants/<ProjectName>/)",
     )
-    parser.add_argument(
-        "--patch",
-        required=True,
-        help="Path to a local .patch file or a URL to download one",
+
+    # ── Run mode arguments ──
+    run = parser.add_argument_group("run mode")
+    run.add_argument("-d", "--directory", help="Target project directory")
+    run.add_argument("-f", "--prompt-file", help="Read the prompt from a .md file")
+    run.add_argument("-o", "--output", help="Write patch to file (default: generated_patches/output.patch)")
+    run.add_argument("-t", "--trajectory", help="Save agent trajectory to this JSON file")
+    run.add_argument(
+        "--branch",
+        help="Git branch to checkout before starting "
+             "(e.g. pr_1263 after fetching the PR)",
     )
-    parser.add_argument(
-        "--problem-statement",
+    run.add_argument(
+        "--gt-patch",
+        help="Ground truth patch file (run: reverse-apply for starting point; "
+             "evaluate: compare against agent patch)",
+    )
+
+    # ── Evaluate mode arguments ──
+    eva = parser.add_argument_group("evaluate mode")
+    eva.add_argument("--agent-patch", help="Path to agent-generated patch file")
+    eva.add_argument(
+        "--issue-statement",
+        help="Issue text or path to a .md/.txt file (evaluate mode)",
+    )
+    eva.add_argument(
+        "--eval-model",
         default=None,
-        help="Problem statement text or path to a text file. If omitted, fetched from PR.",
+        help="LLM judge model name (default: EVAL_MODEL env or gpt-5.2)",
     )
-    parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Output directory (default: Prompts/<ProjectName>/)",
-    )
+    eva.add_argument("--eval-output", help="Path to write evaluation results")
+
     return parser
 
 
@@ -43,15 +64,12 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    try:
-        out = run(
-            repo_url=args.repo_url,
-            pr_url=args.pr_url,
-            patch=args.patch,
-            problem_statement=args.problem_statement,
-            output_dir=args.output_dir,
-        )
-        print(f"\nDone. Output written to: {out}")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    if args.mode == "generate":
+        from .generate.command import handler
+        handler(args)
+    elif args.mode == "run":
+        from .run.command import handler
+        handler(args)
+    elif args.mode == "evaluate":
+        from .evaluate.command import handler
+        handler(args)

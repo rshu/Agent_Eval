@@ -1,8 +1,63 @@
 # Agent_Eval
 
-A tool for generating coding agent evaluation benchmarks from real pull requests. Given a PR (from GitHub or Gitee) and its patch, it produces three prompt variants at different levels of specificity to test how well coding agents handle varying amounts of context.
+Generate, run, and evaluate coding-agent benchmarks from real pull requests.
 
-## Prompt Versions
+```
+agent-eval --mode generate   # Create prompt variants from a PR
+agent-eval --mode run        # Run a coding agent on a prepared workspace
+agent-eval --mode evaluate   # Judge an agent patch against ground truth
+```
+
+## Installation
+
+```bash
+pip install -e .
+# or
+pip install -r requirements.txt
+```
+
+Requires Python 3.10+.
+
+## Configuration
+
+Copy `.env.example` to `.env` and fill in your keys. Generate and evaluate modes can use **different** LLM providers/models:
+
+### Generate mode (`GEN_*`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GEN_PROVIDER` | `openai` | LLM provider (`openai` or `anthropic`) |
+| `GEN_MODEL` | `gpt-5.2` | Model name |
+| `GEN_API_KEY` | — | API key (**required**) |
+| `GEN_BASE_URL` | — | Custom API base URL |
+| `GEN_TEMPERATURE` | `0.3` | Sampling temperature |
+| `GEN_MAX_TOKENS` | `4096` | Max response tokens |
+
+### Evaluate mode (`EVAL_*`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EVAL_PROVIDER` | `openai` | LLM provider (`openai` or `anthropic`) |
+| `EVAL_MODEL` | `gpt-5.2` | Judge model name |
+| `EVAL_API_KEY` | — | API key (**required**) |
+| `EVAL_BASE_URL` | — | Custom API base URL |
+| `EVAL_TEMPERATURE` | `0.3` | Sampling temperature |
+| `EVAL_MAX_TOKENS` | `20480` | Max response tokens |
+
+### Other tokens
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_TOKEN` | GitHub personal access token (increases rate limits) |
+| `GITEE_TOKEN` | Gitee personal access token |
+
+---
+
+## Mode 1 — Generate
+
+Create three prompt variants from a PR and its ground truth patch.
+
+### Prompt Versions
 
 | Version | Name | Description |
 |---------|------|-------------|
@@ -10,158 +65,164 @@ A tool for generating coding agent evaluation benchmarks from real pull requests
 | **v2** | Weaker / More Vague Issue Description | LLM-generated 1-2 sentence simplification of v1 (always starts with "This issue") |
 | **v3** | Detailed Description + Relevant Files List | Same as v1, plus a list of relevant files extracted from the patch |
 
-## Installation
+### Usage
 
 ```bash
-pip install -r requirements.txt
-```
-
-### Requirements
-
-- Python 3.10+
-- An API key for Anthropic or OpenAI (used to generate the v2 simplified prompt)
-
-### Environment Variables
-
-Copy `.env.example` to `.env` in the project root and fill in your keys, or set these in your shell:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_PROVIDER` | `openai` | LLM provider (`anthropic` or `openai`) |
-| `LLM_MODEL` | `gpt-5.2` | Model name |
-| `LLM_API_KEY` | — | API key (falls back to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) |
-| `LLM_BASE_URL` | — | Custom API base URL (optional) |
-| `LLM_TEMPERATURE` | `0.3` | Sampling temperature |
-| `LLM_MAX_TOKENS` | `4096` | Max tokens for the simplified output |
-| `GITHUB_TOKEN` | — | GitHub personal access token (increases rate limits) |
-| `GITEE_TOKEN` | — | Gitee personal access token |
-
-## Usage
-
-```bash
-python -m agent_eval \
+agent-eval --mode generate \
   --repo-url https://gitee.com/chinabugotech/hutool \
   --pr-url https://gitee.com/chinabugotech/hutool/pulls/692 \
-  --patch path/to/pr_692.patch
+  --patch https://gitee.com/chinabugotech/hutool/pulls/692.patch
 ```
-
-### Arguments
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--repo-url` | Yes | Repository URL (GitHub or Gitee) |
-| `--pr-url` | Yes | Pull request URL |
+| `--repo-url` | Yes | Repository URL — must be `https://<host>/owner/repo[.git]` where host is `github.com` or `gitee.com` |
+| `--pr-url` | Yes | Pull request URL (problem statement is fetched from here) |
 | `--patch` | Yes | Path to a local `.patch` file or a URL to download one |
-| `--problem-statement` | No | Problem statement text or path to a text file. If omitted, fetched from the PR. |
-| `--output-dir` | No | Output directory (default: `Prompts/<ProjectName>/`) |
+| `--output-dir` | No | Output directory (default: `prompt_variants/<ProjectName>/`) |
+
+### Input Validation
+
+Both `--repo-url` and `--pr-url` are validated before any network or LLM calls are made:
+
+- **Scheme**: only `http://` and `https://` are accepted (case-insensitive); `ftp://`, `ssh://`, etc. are rejected
+- **Host**: must be `github.com` or `gitee.com` (case-insensitive; default port `:443`/`:80` is stripped)
+- **Path**: `--repo-url` must have exactly two path segments (`owner/repo`); extra segments like `/tree/main` or `/pull/1` are rejected
+- **Segments**: owner and repo names must contain only word characters, dots, and hyphens (no percent-encoded or special characters)
+- **`.git` suffix**: a trailing `.git` on the repo name is stripped (e.g. `repo.git` → `repo`)
+- **Cross-check**: `--repo-url` and `--pr-url` must refer to the same platform **and** the same `owner/repo` (case-insensitive comparison)
+- **PR URL normalization**: trailing slashes, query strings, and URL fragments are stripped before parsing, so browser-copied URLs work as-is
 
 ### Output
 
-The tool writes three files per PR to the output directory:
-
 ```
-Prompts/Hutool/
+prompt_variants/Hutool/
   pr_692_v1.md   # Detailed prompt
   pr_692_v2.md   # Simplified prompt
   pr_692_v3.md   # Detailed prompt + relevant file list
 ```
 
-## Role of the Ground Truth Patch
+### Pipeline
+
+1. **Validate & cross-check URLs** — scheme, host, path structure, segment characters, and repo/PR match (see Input Validation above)
+2. **Load patch** from local file or URL (note: URL patches trigger a download at this step)
+3. **Fetch problem statement** from the PR via GitHub/Gitee API
+4. **Extract file paths** from the loaded patch (for v3 file list); binary files are excluded
+5. **Rewrite problem statement** via LLM using original description + ground truth patch (produces v1)
+6. **Generate simplified statement** via LLM from the rewritten statement (produces v2)
+7. **Render three prompt templates** (v1, v2, v3)
+8. **Write output** to `prompt_variants/<ProjectName>/pr_<id>_v{1,2,3}.md`
+
+### Role of the Ground Truth Patch
 
 The `--patch` argument provides the ground truth patch (the actual merged PR diff). It serves two purposes:
 
-1. **Clarifying the issue**: PR descriptions written by developers are often incomplete or vague. The patch reveals the actual scope and intent of the change, which helps when writing or refining the problem statement.
-2. **Identifying candidate files**: The patch is parsed to extract the list of changed file paths, which are included in the v3 prompt as recommended files for the agent to focus on.
+1. **Clarifying the issue**: PR descriptions are often incomplete. The patch reveals the actual scope and intent, which helps when writing the problem statement.
+2. **Identifying candidate files**: The patch is parsed to extract changed file paths (text files only; binary diffs are excluded), included in the v3 prompt.
 
-The patch is **not** included in any of the generated prompts — it is only used as a reference during prompt generation.
+The patch is **not** included in any generated prompt — it is only used as a reference during generation. Patches larger than 32 000 characters are truncated before being sent to the LLM.
 
-## Pipeline
+---
 
-1. **Load original problem statement** from CLI argument, file, or PR API
-2. **Load and parse patch** to extract changed file paths (for v3 file list)
-3. **Rewrite problem statement** via LLM using original description + ground truth patch (produces the detailed v1 statement)
-4. **Generate simplified statement** via LLM from the rewritten statement (produces the vague v2 statement)
-5. **Render three prompt templates** (v1, v2, v3)
-6. **Write output** to `Prompts/<ProjectName>/pr_<id>_v{1,2,3}.md`
+## Mode 2 — Run
 
-## Example Output
+Run a coding agent on a prepared workspace to produce a patch.
 
-### v1 (Detailed)
+### Usage
 
-```
-Task: You are an automated coding agent. Fix/implement the requested change
-in the repository based on the PR issue description.
-
-Repo Link: https://gitee.com/chinabugotech/hutool
-
-Problem Statement:
-The project currently supports UUID v1 and v4 generation through the IdUtil
-utility class, but lacks support for UUID v7. UUID v7 is a newer standard
-that produces time-ordered unique identifiers, which is useful for database
-keys and distributed systems. There is currently no way to generate UUID v7
-values using the existing ID utilities. ...
-
-Deliverable: Generate a standard git-style patch file (unified diff, i.e.,
-.patch file) that implements the feature and adds/updates the necessary tests.
+```bash
+agent-eval --mode run \
+  -d ./workspaces/repo \
+  -f prompt_variants/Hutool/pr_692_v1.md \
+  -o generated_patches/Hutool/pr_692.patch \
+  --gt-patch patches/pr_692.patch \
+  --branch pr_692
 ```
 
-### v2 (Simplified)
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `-d`, `--directory` | Yes | Target project directory |
+| `-f`, `--prompt-file` | Yes | Prompt file (`.md`) to feed the agent |
+| `-o`, `--output` | No | Output patch path (default: `generated_patches/output.patch`) |
+| `-t`, `--trajectory` | No | Save agent trajectory to this JSON file |
+| `--branch` | No | Git branch to checkout before starting |
+| `--gt-patch` | No | Ground truth patch (reverse-applied to set up the starting point) |
 
+---
+
+## Mode 3 — Evaluate
+
+Judge an agent-generated patch against the ground truth using an LLM.
+
+### Usage
+
+```bash
+agent-eval --mode evaluate \
+  --agent-patch generated_patches/Hutool/pr_692.patch \
+  --gt-patch patches/pr_692.patch \
+  --issue-statement prompt_variants/Hutool/pr_692_v1.md \
+  --eval-output evaluation_scores/Hutool/pr_692.json
 ```
-Task: You are an automated coding agent. Implement the requested change
-described in the issue.
 
-Repo Link: https://gitee.com/chinabugotech/hutool
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--agent-patch` | Yes | Path to agent-generated patch file |
+| `--gt-patch` | Yes | Path to ground truth patch file |
+| `--issue-statement` | Yes | Issue text **or** path to a `.md`/`.txt` file |
+| `--eval-model` | No | Override judge model (default: `EVAL_MODEL` env or `gpt-5.2`) |
+| `--eval-output` | No | Write JSON result to file (default: print to stdout) |
 
-Problem Statement:
-This issue requests adding support for UUID v7 generation to the project
-and including some basic tests to verify it works correctly.
+### Output
 
-Deliverable: Generate a standard git-style patch file (unified diff, i.e.,
-.patch file) that implements the feature and adds/updates the necessary tests.
+A JSON object with verdict, scores, and analysis:
+
+```json
+{
+  "verdict": "PASS | PARTIAL | FAIL",
+  "overall_score": 0-100,
+  "scores": {
+    "functional_correctness": 0-5,
+    "completeness_coverage": 0-5,
+    "equivalence_to_ground_truth": 0-5
+  },
+  "summary": "...",
+  "key_findings": [...],
+  "confidence": 0.0-1.0
+}
 ```
 
-### v3 (Detailed + Files)
+### Scoring
 
-```
-Task: You are an automated coding agent. Fix/implement the requested change
-in the repository based on the PR issue description.
+- **Functional Correctness** (weight 45%): Does the patch correctly address the issue?
+- **Completeness & Coverage** (weight 35%): Are all necessary changes present?
+- **Behavioral Equivalence** (weight 20%): Is the behavior equivalent to ground truth?
+- **Overall score**: `round((A * 9) + (B * 7) + (C * 4))` → 0–100
 
-Repo Link: https://gitee.com/chinabugotech/hutool
+### Verdict Rules
 
-Problem Statement:
-The project currently supports UUID v1 and v4 generation through the IdUtil
-utility class, but lacks support for UUID v7. ...
+| Verdict | Condition |
+|---------|-----------|
+| **FAIL** | Functional correctness ≤ 1, or overall ≤ 30 |
+| **PASS** | All scores high (A ≥ 4, B ≥ 4, C ≥ 3) and overall ≥ 70 |
+| **PARTIAL** | Everything else |
 
-Relevant files to update (non-exhaustive but recommended focus):
-* hutool-core/src/main/java/org/dromara/hutool/core/data/id/IdUtil.java
-* hutool-core/src/main/java/org/dromara/hutool/core/data/id/UUID.java
-* hutool-core/src/test/java/org/dromara/hutool/core/util/IdUtilTest.java
-
-Deliverable: Generate a standard git-style patch file (unified diff, i.e.,
-.patch file) that implements the feature and adds/updates the necessary tests.
-```
+---
 
 ## Workspace Management
 
 The `scripts/reset_workspace.sh` script manages the full lifecycle of an evaluation workspace: cloning a repo at the PR's base commit, sanitizing git history to prevent agents from cheating, applying patches, and cleaning up.
 
-### Prerequisites
-
-- Bash (Linux, macOS, or Git Bash on Windows)
-- Git
-
 ### Subcommands
 
 ```bash
-# 1. Prepare a workspace — clone, checkout base commit, sanitize history
+# 1. Prepare — clone, checkout base commit, sanitize history
 bash scripts/reset_workspace.sh prepare \
   --repo-url https://github.com/org/repo \
   --base-commit abc123 \
   --workspace ./workspaces/repo \
   --ground-truth ./patches/pr_42.patch
 
-# 2. Reset workspace to the clean base state (no re-clone needed)
+# 2. Reset workspace to clean base state
 bash scripts/reset_workspace.sh reset --workspace ./workspaces/repo
 
 # 3. Apply an agent-produced patch
@@ -175,7 +236,7 @@ bash scripts/reset_workspace.sh cleanup --workspace ./workspaces/repo
 
 ### Anti-Cheat Measures
 
-During `prepare`, the original `.git` directory is removed and replaced with a fresh single-commit repository. This prevents agents from accessing git history, remotes, reflogs, or any other information about the original PR:
+During `prepare`, the original `.git` directory is replaced with a fresh single-commit repo:
 
 | Agent cheat attempt | Prevention |
 |---|---|
@@ -183,39 +244,63 @@ During `prepare`, the original `.git` directory is removed and replaced with a f
 | `git diff HEAD~1` | Fails — no parent commit |
 | `git remote -v` | Empty — no remotes |
 | `git reflog` / `git stash` / `git tag` | All empty |
-| Read ground truth patch from disk | Stored outside workspace in a hidden sibling `_meta/` directory |
+| Read ground truth from disk | Stored outside workspace in a hidden `_meta/` directory |
 
-### Evaluation Workflow
+---
+
+## End-to-End Workflow
 
 ```
-1. Generate prompts      python -m agent_eval --repo-url ... --pr-url ... --patch ...
-2. Prepare workspace     bash scripts/reset_workspace.sh prepare --repo-url ... --base-commit ... --workspace ... --ground-truth ...
-3. Run coding agent      (agent works inside the workspace, produces a patch)
-4. Reset workspace       bash scripts/reset_workspace.sh reset --workspace ...
-5. Apply agent patch     bash scripts/reset_workspace.sh apply --workspace ... --patch agent.patch
-6. Compare results       diff the agent's patch against the ground truth
-7. Cleanup               bash scripts/reset_workspace.sh cleanup --workspace ...
+1. Generate prompts      agent-eval --mode generate --repo-url ... --pr-url ... --patch ...
+                         → prompt_variants/<Project>/pr_<id>_v{1,2,3}.md
+2. Prepare workspace     bash scripts/reset_workspace.sh prepare ...
+3. Run coding agent      agent-eval --mode run -d ./workspaces/repo -f prompt.md -o generated_patches/<Project>/pr_<id>.patch
+                         → generated_patches/<Project>/pr_<id>.patch
+4. Evaluate result       agent-eval --mode evaluate --agent-patch generated_patches/... --gt-patch gt.patch --issue-statement prompt.md --eval-output evaluation_scores/<Project>/pr_<id>.json
+                         → evaluation_scores/<Project>/pr_<id>.json
+5. Cleanup               bash scripts/reset_workspace.sh cleanup --workspace ./workspaces/repo
 ```
 
 ## Project Structure
 
 ```
 agent_eval/
-  __init__.py          # Package version
-  __main__.py          # Entry point
-  cli.py               # Argument parsing
-  renderer.py          # Orchestrator: ties all modules together
-  templates.py         # Markdown template rendering for v1/v2/v3
-  simplifier.py        # LLM-based problem statement simplification
-  patch_parser.py      # Extracts file paths from unified diffs
-  fetcher.py           # HTTP fetching for PR descriptions and patches
-Prompts/
-  <ProjectName>/       # One directory per project (e.g., Hutool/, Pytorch/)
-    pr_<id>_v1.md      # Detailed prompt
-    pr_<id>_v2.md      # Simplified prompt
-    pr_<id>_v3.md      # Detailed prompt + relevant file list
+  __init__.py                # Package version
+  __main__.py                # Entry point (python -m agent_eval)
+  cli.py                     # Argument parsing & mode routing
+  generate/
+    command.py               # Generate mode handler
+    renderer.py              # Orchestrator: ties all generate modules together
+    templates.py             # Markdown template rendering for v1/v2/v3
+    simplifier.py            # LLM-based problem statement rewriting & simplification
+    patch_parser.py          # Extracts file paths from unified diffs
+    fetcher.py               # HTTP fetching for PR descriptions and patches
+  run/
+    command.py               # Run mode handler
+    opencode_client.py       # OpenCode server API client
+    model_resolver.py        # Model name resolution
+    git_helpers.py           # Git operations (checkout, patch apply)
+    patch_utils.py           # Patch file utilities
+    trajectory.py            # Agent trajectory recording
+  evaluate/
+    command.py               # Evaluate mode handler
+    evaluator.py             # PatchEvaluator — LLM-based judge
+    llm_client.py            # API client factory (OpenAI / Anthropic)
+    prompt_template.py       # Embedded evaluation prompt template
+    exceptions.py            # Custom exception hierarchy
+prompt_variants/             # Output from generate mode
+  <ProjectName>/
+    pr_<id>_v1.md
+    pr_<id>_v2.md
+    pr_<id>_v3.md
+generated_patches/           # Output from run mode
+  <ProjectName>/
+    pr_<id>.patch
+evaluation_scores/           # Output from evaluate mode
+  <ProjectName>/
+    pr_<id>.json
 scripts/
-  reset_workspace.sh   # Workspace lifecycle management (prepare/reset/apply/cleanup)
-.env.example           # Template for environment variables
-requirements.txt       # Python dependencies
+  reset_workspace.sh         # Workspace lifecycle (prepare/reset/apply/cleanup)
+.env.example                 # Environment variable template
+pyproject.toml               # Package metadata & dependencies
 ```

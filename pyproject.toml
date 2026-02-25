@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-eval"
+version = "0.2.0"
+description = "Generate, run, and evaluate coding agent benchmarks"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.39.0",
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+agent-eval = "agent_eval.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_eval*"]

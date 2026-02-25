@@ -7,6 +7,11 @@ from dotenv import load_dotenv
 
 _dotenv_loaded = False
 
+# Maximum number of characters from the patch to include in the LLM prompt.
+# Large diffs can exceed model context windows; we keep only the head which
+# is usually enough for the LLM to understand scope and intent.
+MAX_PATCH_CHARS = 32_000
+
 # ---------------------------------------------------------------------------
 # System prompts
 # ---------------------------------------------------------------------------
@@ -136,6 +141,13 @@ SIMPLIFY_EXAMPLES = [
 # ---------------------------------------------------------------------------
 
 
+def _truncate_patch(patch_text: str, limit: int = MAX_PATCH_CHARS) -> str:
+    """Return *patch_text* truncated to *limit* characters with a notice."""
+    if len(patch_text) <= limit:
+        return patch_text
+    return patch_text[:limit] + "\n\n[… patch truncated for length …]\n"
+
+
 def _build_rewrite_message(original: str, patch_text: str) -> str:
     """Build the few-shot user message for rewriting."""
     examples = ""
@@ -148,13 +160,14 @@ def _build_rewrite_message(original: str, patch_text: str) -> str:
         )
 
     original_section = original.strip() if original.strip() else "(empty)"
+    safe_patch = _truncate_patch(patch_text)
 
     return (
         f"{examples}"
         f"Now rewrite the following:\n"
         f"---\n"
         f"ORIGINAL DESCRIPTION:\n{original_section}\n\n"
-        f"GROUND TRUTH PATCH:\n{patch_text}\n"
+        f"GROUND TRUTH PATCH:\n{safe_patch}\n"
         f"---\n\n"
         f"Output ONLY the rewritten problem statement, nothing else."
     )
@@ -188,19 +201,19 @@ def _build_simplify_message(problem_statement: str) -> str:
 def _ensure_dotenv() -> None:
     global _dotenv_loaded
     if not _dotenv_loaded:
-        load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
         _dotenv_loaded = True
 
 
 def _get_llm_config() -> dict:
     _ensure_dotenv()
     return {
-        "provider": os.getenv("LLM_PROVIDER", "openai").lower(),
-        "model": os.getenv("LLM_MODEL", "gpt-5.2"),
-        "base_url": os.getenv("LLM_BASE_URL") or None,
-        "api_key": os.getenv("LLM_API_KEY") or None,
-        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.3")),
-        "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "4096")),
+        "provider": os.getenv("GEN_PROVIDER", "openai").lower(),
+        "model": os.getenv("GEN_MODEL", "gpt-5.2"),
+        "base_url": os.getenv("GEN_BASE_URL") or None,
+        "api_key": os.getenv("GEN_API_KEY") or None,
+        "temperature": float(os.getenv("GEN_TEMPERATURE", "0.3")),
+        "max_tokens": int(os.getenv("GEN_MAX_TOKENS", "4096")),
     }
 
 
@@ -208,7 +221,13 @@ def _call_llm(system_prompt: str, user_message: str) -> str:
     """Call the configured LLM provider and return the response text."""
     cfg = _get_llm_config()
 
-    if cfg["provider"] == "openai":
+    provider = cfg["provider"]
+    if provider not in ("openai", "anthropic"):
+        raise ValueError(
+            f"Invalid GEN_PROVIDER={provider!r}. Must be 'openai' or 'anthropic'."
+        )
+
+    if provider == "openai":
         from openai import OpenAI
 
         client = OpenAI(
@@ -225,6 +244,8 @@ def _call_llm(system_prompt: str, user_message: str) -> str:
                 {"role": "user", "content": user_message},
             ],
         )
+        if not response.choices or not response.choices[0].message.content:
+            raise RuntimeError("LLM returned an empty response (OpenAI provider)")
         return response.choices[0].message.content.strip()
     else:
         import anthropic
@@ -241,6 +262,8 @@ def _call_llm(system_prompt: str, user_message: str) -> str:
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
+        if not message.content or not hasattr(message.content[0], "text"):
+            raise RuntimeError("LLM returned an empty response (Anthropic provider)")
         return message.content[0].text.strip()
 
 

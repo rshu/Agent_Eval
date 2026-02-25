@@ -14,15 +14,18 @@ def format_file_list(files: list[str]) -> str:
     return "\n".join(f"* `{f}`" for f in files)
 
 
-def render_v1(repo_url: str, problem_statement: str) -> str:
+def render_v1(repo_url: str, problem_statement: str,
+              include_repo_url: bool = True) -> str:
     """Render the v1 (detailed) prompt markdown."""
-    return (
-        f"**Task:**\n"
-        f"You are an automated coding agent. {TASK_LINE_V1}\n"
+    repo_block = (
         f"\n"
         f"**Repo Link:**\n"
         f"[{repo_url}]({repo_url})\n"
-        f"\n"
+    ) if include_repo_url else ""
+    return (
+        f"**Task:**\n"
+        f"You are an automated coding agent. {TASK_LINE_V1}\n"
+        f"{repo_block}\n"
         f"**Problem Statement:**\n"
         f"{problem_statement}\n"
         f"\n"
@@ -31,15 +34,18 @@ def render_v1(repo_url: str, problem_statement: str) -> str:
     )
 
 
-def render_v2(repo_url: str, simplified_statement: str) -> str:
+def render_v2(repo_url: str, simplified_statement: str,
+              include_repo_url: bool = True) -> str:
     """Render the v2 (vague) prompt markdown."""
-    return (
-        f"**Task:**\n"
-        f"You are an automated coding agent. {TASK_LINE_V2}\n"
+    repo_block = (
         f"\n"
         f"**Repo Link:**\n"
         f"[{repo_url}]({repo_url})\n"
-        f"\n"
+    ) if include_repo_url else ""
+    return (
+        f"**Task:**\n"
+        f"You are an automated coding agent. {TASK_LINE_V2}\n"
+        f"{repo_block}\n"
         f"**Problem Statement:**\n"
         f"{simplified_statement}\n"
         f"\n"
@@ -48,19 +54,22 @@ def render_v2(repo_url: str, simplified_statement: str) -> str:
     )
 
 
-def render_v3(repo_url: str, problem_statement: str, files: list[str]) -> str:
+def render_v3(repo_url: str, problem_statement: str, files: list[str],
+              include_repo_url: bool = True) -> str:
     """Render the v3 (detailed + file list) prompt markdown.
 
     Identical to v1, with an additional relevant-files section before the deliverable.
     """
     file_list = format_file_list(files)
-    return (
-        f"**Task:**\n"
-        f"You are an automated coding agent. {TASK_LINE_V1}\n"
+    repo_block = (
         f"\n"
         f"**Repo Link:**\n"
         f"[{repo_url}]({repo_url})\n"
-        f"\n"
+    ) if include_repo_url else ""
+    return (
+        f"**Task:**\n"
+        f"You are an automated coding agent. {TASK_LINE_V1}\n"
+        f"{repo_block}\n"
         f"**Problem Statement:**\n"
         f"{problem_statement}\n"
         f"\n"
