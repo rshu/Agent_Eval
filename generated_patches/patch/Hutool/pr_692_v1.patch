@@ -1,0 +1,232 @@
+diff --git a/.agent_eval_sanitize_meta.json b/.agent_eval_sanitize_meta.json
+new file mode 100644
+index 0000000..e254057
+--- /dev/null
++++ b/.agent_eval_sanitize_meta.json
+@@ -0,0 +1 @@
++{"backup_dir": "/tmp/agent_eval_git_bak_0osyo3ay"}
+\ No newline at end of file
+diff --git a/hutool-core/src/main/java/cn/hutool/core/lang/func/PredicateUtil.java b/hutool-core/src/main/java/cn/hutool/core/lang/func/PredicateUtil.java
+index 4efc352..1edcadd 100644
+--- a/hutool-core/src/main/java/cn/hutool/core/lang/func/PredicateUtil.java
++++ b/hutool-core/src/main/java/cn/hutool/core/lang/func/PredicateUtil.java
+@@ -1,11 +1,12 @@
+ package cn.hutool.core.lang.func;
+ 
+-import cn.hutool.core.collection.ListUtil;
++import cn.hutool.core.stream.StreamUtil;
+ import cn.hutool.core.text.StrUtil;
+ 
+ import java.io.Serializable;
+ import java.util.List;
+ import java.util.function.Predicate;
++import java.util.stream.Collectors;
+ 
+ /**
+  * 一些{@link Predicate}相关封装
+@@ -26,8 +27,9 @@ public class PredicateUtil {
+ 	 * @param components 多个条件
+ 	 * @return 复合条件
+ 	 */
++	@SuppressWarnings("unchecked")
+ 	public static <T> Predicate<T> and(final Iterable<? extends Predicate<? super T>> components) {
+-		return new AndPredicate<>(ListUtil.of(components));
++		return new AndPredicate<>(StreamUtil.of(components).collect(Collectors.toList()));
+ 	}
+ 
+ 	/**
+@@ -37,6 +39,7 @@ public class PredicateUtil {
+ 	 * @param components 多个条件
+ 	 * @return 复合条件
+ 	 */
++	@SafeVarargs
+ 	@SuppressWarnings("unchecked")
+ 	public static <T> Predicate<T> and(final Predicate<? super T>... components) {
+ 		return new AndPredicate<>(components);
+@@ -49,8 +52,9 @@ public class PredicateUtil {
+ 	 * @param components 多个条件
+ 	 * @return 复合条件
+ 	 */
++	@SuppressWarnings("unchecked")
+ 	public static <T> Predicate<T> or(final Iterable<? extends Predicate<? super T>> components) {
+-		return new OrPredicate<>(ListUtil.of(components));
++		return new OrPredicate<>(StreamUtil.of(components).collect(Collectors.toList()));
+ 	}
+ 
+ 	/**
+@@ -60,6 +64,7 @@ public class PredicateUtil {
+ 	 * @param components 多个条件
+ 	 * @return 复合条件
+ 	 */
++	@SafeVarargs
+ 	@SuppressWarnings("unchecked")
+ 	public static <T> Predicate<T> or(final Predicate<? super T>... components) {
+ 		return new OrPredicate<>(components);
+@@ -77,10 +82,12 @@ public class PredicateUtil {
+ 		private final List<? extends Predicate<? super T>> components;
+ 
+ 		@SafeVarargs
++		@SuppressWarnings("unchecked")
+ 		private AndPredicate(final Predicate<? super T>... components) {
+-			this.components = ListUtil.of(components);
++			this.components = StreamUtil.of(components).collect(Collectors.toList());
+ 		}
+ 
++		@SuppressWarnings("unchecked")
+ 		private AndPredicate(final List<? extends Predicate<? super T>> components) {
+ 			this.components = components;
+ 		}
+@@ -115,10 +122,12 @@ public class PredicateUtil {
+ 		private final List<? extends Predicate<? super T>> components;
+ 
+ 		@SafeVarargs
++		@SuppressWarnings("unchecked")
+ 		private OrPredicate(final Predicate<? super T>... components) {
+-			this.components = ListUtil.of(components);
++			this.components = StreamUtil.of(components).collect(Collectors.toList());
+ 		}
+ 
++		@SuppressWarnings("unchecked")
+ 		private OrPredicate(final List<? extends Predicate<? super T>> components) {
+ 			this.components = components;
+ 		}
+@@ -128,7 +137,7 @@ public class PredicateUtil {
+ 			// Avoid using the Iterator to avoid generating garbage
+ 			//noinspection ForLoopReplaceableByForEach
+ 			for (int i = 0; i < components.size(); i++) {
+-				if (false == components.get(i).test(t)) {
++				if (components.get(i).test(t)) {
+ 					return true;
+ 				}
+ 			}
+diff --git a/hutool-core/src/test/java/cn/hutool/core/lang/func/PredicateUtilTest.java b/hutool-core/src/test/java/cn/hutool/core/lang/func/PredicateUtilTest.java
+index 83d2029..dd03884 100644
+--- a/hutool-core/src/test/java/cn/hutool/core/lang/func/PredicateUtilTest.java
++++ b/hutool-core/src/test/java/cn/hutool/core/lang/func/PredicateUtilTest.java
+@@ -1,5 +1,6 @@
+ package cn.hutool.core.lang.func;
+ 
++import cn.hutool.core.collection.ListUtil;
+ import cn.hutool.core.collection.SetUtil;
+ import org.junit.Assert;
+ import org.junit.Test;
+@@ -22,4 +23,119 @@ public class PredicateUtilTest {
+ 		Assert.assertEquals("4", collect.get(0));
+ 		Assert.assertEquals("5", collect.get(1));
+ 	}
++
++	@Test
++	public void andVarargsTest() {
++		final Predicate<Integer> greaterThan5 = i -> i > 5;
++		final Predicate<Integer> lessThan10 = i -> i < 10;
++		final Predicate<Integer> even = i -> i % 2 == 0;
++
++		final Predicate<Integer> combined = PredicateUtil.and(greaterThan5, lessThan10, even);
++
++		Assert.assertFalse(combined.test(4));
++		Assert.assertFalse(combined.test(5));
++		Assert.assertTrue(combined.test(6));
++		Assert.assertFalse(combined.test(7));
++		Assert.assertTrue(combined.test(8));
++		Assert.assertFalse(combined.test(10));
++		Assert.assertFalse(combined.test(12));
++	}
++
++	@Test
++	public void andIterableTest() {
++		final Predicate<String> startsWithA = s -> s.startsWith("A");
++		final Predicate<String> endsWithZ = s -> s.endsWith("Z");
++		final List<Predicate<String>> predicates = ListUtil.of(startsWithA, endsWithZ);
++
++		final Predicate<String> combined = PredicateUtil.and(predicates);
++
++		Assert.assertTrue(combined.test("AZ"));
++		Assert.assertFalse(combined.test("AB"));
++		Assert.assertFalse(combined.test("BZ"));
++		Assert.assertFalse(combined.test("BA"));
++	}
++
++	@Test
++	public void andEmptyTest() {
++		@SuppressWarnings("unchecked")
++		final Predicate<Integer> combined = PredicateUtil.and();
++		Assert.assertTrue(combined.test(1));
++		Assert.assertTrue(combined.test(100));
++	}
++
++	@Test
++	public void andSingleTest() {
++		final Predicate<Integer> isPositive = i -> i > 0;
++		final Predicate<Integer> combined = PredicateUtil.and(isPositive);
++
++		Assert.assertTrue(combined.test(1));
++		Assert.assertFalse(combined.test(-1));
++		Assert.assertFalse(combined.test(0));
++	}
++
++	@Test
++	public void orVarargsTest() {
++		final Predicate<Integer> isZero = i -> i == 0;
++		final Predicate<Integer> isNegative = i -> i < 0;
++
++		final Predicate<Integer> combined = PredicateUtil.or(isZero, isNegative);
++
++		Assert.assertTrue(combined.test(-5));
++		Assert.assertTrue(combined.test(0));
++		Assert.assertFalse(combined.test(5));
++		Assert.assertFalse(combined.test(100));
++	}
++
++	@Test
++	public void orIterableTest() {
++		final Predicate<String> containsA = s -> s.contains("A");
++		final Predicate<String> containsB = s -> s.contains("B");
++		final List<Predicate<String>> predicates = ListUtil.of(containsA, containsB);
++
++		final Predicate<String> combined = PredicateUtil.or(predicates);
++
++		Assert.assertTrue(combined.test("A"));
++		Assert.assertTrue(combined.test("B"));
++		Assert.assertTrue(combined.test("AB"));
++		Assert.assertFalse(combined.test("C"));
++		Assert.assertFalse(combined.test("XYZ"));
++	}
++
++	@Test
++	public void orEmptyTest() {
++		@SuppressWarnings("unchecked")
++		final Predicate<Integer> combined = PredicateUtil.or();
++		Assert.assertFalse(combined.test(1));
++		Assert.assertFalse(combined.test(0));
++		Assert.assertFalse(combined.test(-1));
++	}
++
++	@Test
++	public void orSingleTest() {
++		final Predicate<Integer> isEven = i -> i % 2 == 0;
++		final Predicate<Integer> combined = PredicateUtil.or(isEven);
++
++		Assert.assertTrue(combined.test(2));
++		Assert.assertFalse(combined.test(1));
++		Assert.assertTrue(combined.test(0));
++	}
++
++	@Test
++	public void negateTest() {
++		final Predicate<Integer> isPositive = i -> i > 0;
++		final Predicate<Integer> isNotPositive = PredicateUtil.negate(isPositive);
++
++		Assert.assertFalse(isNotPositive.test(1));
++		Assert.assertTrue(isNotPositive.test(0));
++		Assert.assertTrue(isNotPositive.test(-1));
++	}
++
++	@Test
++	public void andToStringTest() {
++		final Predicate<Integer> p1 = i -> i > 0;
++		final Predicate<Integer> p2 = i -> i < 10;
++		final Predicate<Integer> combined = PredicateUtil.and(p1, p2);
++
++		Assert.assertTrue(combined.toString().startsWith("Predicates.and("));
++	}
+ }

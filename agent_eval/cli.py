@@ -30,17 +30,18 @@ def build_parser() -> argparse.ArgumentParser:
     run = parser.add_argument_group("run mode")
     run.add_argument("-d", "--directory", help="Target project directory")
     run.add_argument("-f", "--prompt-file", help="Read the prompt from a .md file")
-    run.add_argument("-o", "--output", help="Write patch to file (default: generated_patches/output.patch)")
-    run.add_argument("-t", "--trajectory", help="Save agent trajectory to this JSON file")
     run.add_argument(
         "--branch",
         help="Git branch to checkout before starting "
              "(e.g. pr_1263 after fetching the PR)",
     )
-    run.add_argument(
+
+    # ── Shared: run + evaluate ──
+    shared = parser.add_argument_group("run / evaluate shared")
+    shared.add_argument(
         "--gt-patch",
-        help="Ground truth patch file (run: reverse-apply for starting point; "
-             "evaluate: compare against agent patch)",
+        help="Ground truth patch file (run: reverse-applied for starting point; "
+             "evaluate: compared against agent patch)",
     )
 
     # ── Evaluate mode arguments ──

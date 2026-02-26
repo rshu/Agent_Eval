@@ -126,7 +126,7 @@ The patch is **not** included in any generated prompt — it is only used as a r
 
 ## Mode 2 — Run
 
-Run a coding agent on a prepared workspace to produce a patch.
+Run a coding agent on a prepared workspace to produce a patch. Run mode handles the full lifecycle automatically: branch checkout, git history sanitization, ground truth reverse-apply, agent execution (with up to 3 retries), patch extraction, trajectory recording, and workspace restoration.
 
 ### Usage
 
@@ -134,8 +134,7 @@ Run a coding agent on a prepared workspace to produce a patch.
 agent-eval --mode run \
   -d ./workspaces/repo \
   -f prompt_variants/Hutool/pr_692_v1.md \
-  -o generated_patches/Hutool/pr_692.patch \
-  --gt-patch patches/pr_692.patch \
+  --gt-patch https://gitee.com/chinabugotech/hutool/pulls/692.patch \
   --branch pr_692
 ```
 
@@ -143,10 +142,67 @@ agent-eval --mode run \
 |----------|----------|-------------|
 | `-d`, `--directory` | Yes | Target project directory |
 | `-f`, `--prompt-file` | Yes | Prompt file (`.md`) to feed the agent |
-| `-o`, `--output` | No | Output patch path (default: `generated_patches/output.patch`) |
-| `-t`, `--trajectory` | No | Save agent trajectory to this JSON file |
-| `--branch` | No | Git branch to checkout before starting |
-| `--gt-patch` | No | Ground truth patch (reverse-applied to set up the starting point) |
+| `--branch` | No | Git branch to checkout before starting (fetched from remote or PR ref if not found locally) |
+| `--gt-patch` | No | Ground truth patch — local file path **or** URL (reverse-applied to set up the starting point) |
+
+### Run mode (`OPENCODE_*`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCODE_BASE_URL` | `http://127.0.0.1:4096` | OpenCode server URL |
+| `OPENCODE_SERVER_USERNAME` | `opencode` | HTTP basic auth username |
+| `OPENCODE_SERVER_PASSWORD` | — | HTTP basic auth password |
+| `OPENCODE_MODEL` | — | Model override (`provider:model`, e.g. `openrouter:anthropic/claude-sonnet-4`) |
+| `OPENCODE_CONFIG_PATH` | `~/.config/opencode/config.json` | Path to OpenCode config file |
+
+### Output
+
+Patches and trajectories are written to fixed paths derived from the prompt file path:
+
+```
+generated_patches/
+  patch/Hutool/
+    pr_692_v1.patch        # Agent-generated patch
+  trajectory/Hutool/
+    pr_692_v1.json         # Full trajectory (messages, tool calls, timing, token usage)
+```
+
+### Lifecycle
+
+1. **Sanitize prompt** — strip repository URLs to prevent agents from looking up the PR
+2. **Health check** — verify the OpenCode server is running
+3. **Resolve model** — from env var, config file, or server catalog
+4. **Setup starting point** — checkout branch, reverse-apply ground truth patch, sanitize git history, commit baseline
+5. **Retry loop** (up to 3 attempts) — create session, send task, collect patch, validate
+6. **Write outputs** — patch file and trajectory JSON
+7. **Restore repo** — undo all git mutations, restore original `.git` history and branch
+
+### Anti-Cheat Measures
+
+During setup, the original `.git` directory is backed up and replaced with a fresh single-commit repo:
+
+| Agent cheat attempt | Prevention |
+|---|---|
+| `git log` | Only one commit ("base"), no useful info |
+| `git diff HEAD~1` | Fails — no parent commit |
+| `git remote -v` | Empty — no remotes |
+| `git reflog` / `git stash` / `git tag` | All empty |
+| Read ground truth from disk | Patch is applied and removed before agent runs |
+| Internal metadata in patch | Sidecar files excluded from git and stripped from output |
+
+### Security Hardening
+
+The run subpackage is hardened against a malicious agent running as the same OS user with full filesystem access. Defense-in-depth layers include:
+
+**Sidecar trust hierarchy** — Metadata (backup location, pre-existing ignored files, file permissions) is stored in a sidecar with a 3-level lookup ordered by trust: (1) explicit `backup_dir` decoded from Python-memory-only `original_ref` (most trusted), (2) `.git/info/sidecar_backup` hint file, (3) in-repo sidecar (least trusted, agent can freely tamper).
+
+**Ignored-file restore gates** — Files restored from backup must pass: `_is_safe_relpath()` string validation (rejects absolute paths, `..` traversals, and `.git/*` internals), `_is_git_tracked()` check (rejects tracked files), and post-`makedirs` realpath boundary verification (catches symlink-escape attacks).
+
+**Backup integrity** — `_lock_backup_dir()` sets sidecar and ignored-file backups read-only. `_is_plausible_backup_dir()` validates prefix, temp-directory parent, and `.git` presence. Untrusted backup sources are never used for `.git` restoration (prevents hook-injection via forged backup).
+
+**Malformed data hardening** — All server responses validated with `isinstance()` before use. Sidecar loader rejects non-dict JSON. Field-level type validation for `backup_dir` (str), `pre_agent_ignored` (list of str), `pre_agent_modes` (dict with `math.isfinite()` guard). Trajectory parser handles non-dict messages, non-list parts, non-dict info payloads. `check_health()` and `create_session()` raise clear `RuntimeError` on unexpected response shapes.
+
+**Permission preservation** — Original file modes recorded in sidecar, restored with setuid/setgid/sticky masking and minimum user-write guarantee. Backup-contents enumeration provides an authoritative complement to the (tamperable) `pre_agent_ignored` list during cleanup.
 
 ---
 
@@ -158,10 +214,10 @@ Judge an agent-generated patch against the ground truth using an LLM.
 
 ```bash
 agent-eval --mode evaluate \
-  --agent-patch generated_patches/Hutool/pr_692.patch \
+  --agent-patch generated_patches/patch/Hutool/pr_692_v1.patch \
   --gt-patch patches/pr_692.patch \
   --issue-statement prompt_variants/Hutool/pr_692_v1.md \
-  --eval-output evaluation_scores/Hutool/pr_692.json
+  --eval-output evaluation_scores/Hutool/pr_692_v1.json
 ```
 
 | Argument | Required | Description |
@@ -210,9 +266,9 @@ A JSON object with verdict, scores, and analysis:
 
 ## Workspace Management
 
-The `scripts/reset_workspace.sh` script manages the full lifecycle of an evaluation workspace: cloning a repo at the PR's base commit, sanitizing git history to prevent agents from cheating, applying patches, and cleaning up.
+Run mode (`--mode run`) handles workspace setup, sanitization, and restoration automatically. The `scripts/reset_workspace.sh` script is a standalone alternative for manual workspace management outside of run mode.
 
-### Subcommands
+### Manual Script (optional)
 
 ```bash
 # 1. Prepare — clone, checkout base commit, sanitize history
@@ -234,18 +290,6 @@ bash scripts/reset_workspace.sh apply \
 bash scripts/reset_workspace.sh cleanup --workspace ./workspaces/repo
 ```
 
-### Anti-Cheat Measures
-
-During `prepare`, the original `.git` directory is replaced with a fresh single-commit repo:
-
-| Agent cheat attempt | Prevention |
-|---|---|
-| `git log` | Only one commit ("base"), no useful info |
-| `git diff HEAD~1` | Fails — no parent commit |
-| `git remote -v` | Empty — no remotes |
-| `git reflog` / `git stash` / `git tag` | All empty |
-| Read ground truth from disk | Stored outside workspace in a hidden `_meta/` directory |
-
 ---
 
 ## End-to-End Workflow
@@ -253,13 +297,16 @@ During `prepare`, the original `.git` directory is replaced with a fresh single-
 ```
 1. Generate prompts      agent-eval --mode generate --repo-url ... --pr-url ... --patch ...
                          → prompt_variants/<Project>/pr_<id>_v{1,2,3}.md
-2. Prepare workspace     bash scripts/reset_workspace.sh prepare ...
-3. Run coding agent      agent-eval --mode run -d ./workspaces/repo -f prompt.md -o generated_patches/<Project>/pr_<id>.patch
-                         → generated_patches/<Project>/pr_<id>.patch
-4. Evaluate result       agent-eval --mode evaluate --agent-patch generated_patches/... --gt-patch gt.patch --issue-statement prompt.md --eval-output evaluation_scores/<Project>/pr_<id>.json
-                         → evaluation_scores/<Project>/pr_<id>.json
-5. Cleanup               bash scripts/reset_workspace.sh cleanup --workspace ./workspaces/repo
+
+2. Run coding agent      agent-eval --mode run -d ./workspaces/repo -f prompt.md --gt-patch gt.patch --branch pr_<id>
+                         → generated_patches/patch/<Project>/pr_<id>_v1.patch
+                         → generated_patches/trajectory/<Project>/pr_<id>_v1.json
+
+3. Evaluate result       agent-eval --mode evaluate --agent-patch generated_patches/patch/... --gt-patch gt.patch --issue-statement prompt.md --eval-output evaluation_scores/<Project>/pr_<id>_v1.json
+                         → evaluation_scores/<Project>/pr_<id>_v{1,2,3}.json
 ```
+
+Workspace setup (branch checkout, sanitization, baseline) and teardown (restore) are handled automatically by run mode.
 
 ## Project Structure
 
@@ -276,12 +323,12 @@ agent_eval/
     patch_parser.py          # Extracts file paths from unified diffs
     fetcher.py               # HTTP fetching for PR descriptions and patches
   run/
-    command.py               # Run mode handler
-    opencode_client.py       # OpenCode server API client
-    model_resolver.py        # Model name resolution
-    git_helpers.py           # Git operations (checkout, patch apply)
-    patch_utils.py           # Patch file utilities
-    trajectory.py            # Agent trajectory recording
+    command.py               # Run mode handler (retry loop, lifecycle orchestration)
+    opencode_client.py       # OpenCode server HTTP client, session lifecycle, response validation
+    model_resolver.py        # Model name resolution (env, config file, server catalog)
+    git_helpers.py           # Git lifecycle (checkout, sanitize, baseline, reset, restore, sidecar trust)
+    patch_utils.py           # Patch extraction, validation, prompt sanitization
+    trajectory.py            # Trajectory collection and recording (messages, tool calls, timing)
   evaluate/
     command.py               # Evaluate mode handler
     evaluator.py             # PatchEvaluator — LLM-based judge
@@ -294,11 +341,17 @@ prompt_variants/             # Output from generate mode
     pr_<id>_v2.md
     pr_<id>_v3.md
 generated_patches/           # Output from run mode
-  <ProjectName>/
-    pr_<id>.patch
+  patch/
+    <ProjectName>/
+      pr_<id>_v1.patch
+  trajectory/
+    <ProjectName>/
+      pr_<id>_v1.json
 evaluation_scores/           # Output from evaluate mode
   <ProjectName>/
-    pr_<id>.json
+    pr_<id>_v1.json
+    pr_<id>_v2.json
+    pr_<id>_v3.json
 scripts/
   reset_workspace.sh         # Workspace lifecycle (prepare/reset/apply/cleanup)
 .env.example                 # Environment variable template

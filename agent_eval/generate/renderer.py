@@ -34,7 +34,7 @@ def resolve_pr_number(pr_url: str) -> str:
 def load_patch(patch_arg: str) -> str:
     """Load patch content from a file path or URL."""
     if is_url(patch_arg):
-        print(f"Downloading patch from {patch_arg}...")
+        print(f"[..] Downloading patch from {patch_arg}...")
         return fetch_patch_from_url(patch_arg)
     p = Path(patch_arg)
     if not p.is_file():
@@ -57,25 +57,25 @@ def run(
     patch_text = load_patch(patch)
 
     # 1. Fetch problem statement from the PR
-    print("Fetching problem statement from PR...")
+    print("[..] Fetching problem statement from PR...")
     original_ps = fetch_pr_description(pr_url)
-    print(f"Original problem statement loaded ({len(original_ps)} chars).")
+    print(f"[ok] Problem statement loaded ({len(original_ps)} chars)")
 
     # 2. Parse patch for file list
     files = extract_files_from_patch(patch_text)
-    print(f"Extracted {len(files)} file(s) from patch.")
+    print(f"[ok] Extracted {len(files)} file(s) from patch")
     if not files:
-        print("Warning: no files extracted from patch. v3 will have an empty file list.")
+        print("[warn] No files extracted from patch; v3 will have an empty file list")
 
     # 3. Rewrite problem statement via LLM (original + patch -> detailed v1)
-    print("Rewriting problem statement via LLM...")
+    print("[..] Rewriting problem statement via LLM...")
     rewritten = rewrite_problem_statement(original_ps, patch_text)
-    print(f"Rewritten problem statement generated ({len(rewritten)} chars).")
+    print(f"[ok] Rewritten problem statement generated ({len(rewritten)} chars)")
 
     # 4. Generate simplified statement via LLM (rewritten -> vague v2)
-    print("Generating simplified problem statement (v2) via LLM...")
+    print("[..] Generating simplified problem statement (v2) via LLM...")
     simplified = simplify_problem_statement(rewritten)
-    print("Simplified statement generated.")
+    print("[ok] Simplified statement generated")
 
     # 5. Render templates
     v1 = render_v1(repo_url, rewritten)
@@ -90,6 +90,6 @@ def run(
     for suffix, content in [("v1", v1), ("v2", v2), ("v3", v3)]:
         path = out / f"pr_{pr_num}_{suffix}.md"
         path.write_text(content, encoding="utf-8")
-        print(f"Wrote {path}")
+        print(f"[ok] Wrote {path}")
 
     return out

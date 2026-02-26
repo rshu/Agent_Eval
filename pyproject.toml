@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-eval"
-version = "0.2.0"
+version = "1.0.0"
 description = "Generate, run, and evaluate coding agent benchmarks"
 requires-python = ">=3.10"
 dependencies = [

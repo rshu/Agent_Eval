@@ -9,7 +9,7 @@ def handler(args):
     """Entry point for generate mode."""
     for name in ("repo_url", "pr_url", "patch"):
         if not getattr(args, name, None):
-            sys.exit(f"Error: --{name.replace('_', '-')} is required for generate mode")
+            sys.exit(f"[error] --{name.replace('_', '-')} is required for generate mode")
 
     try:
         out = run(
@@ -18,7 +18,7 @@ def handler(args):
             patch=args.patch,
             output_dir=args.output_dir,
         )
-        print(f"\nDone. Output written to: {out}")
+        print(f"\n[ok] Output written to: {out}")
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"[error] {e}", file=sys.stderr)
         sys.exit(1)

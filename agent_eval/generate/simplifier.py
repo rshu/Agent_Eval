@@ -227,6 +227,11 @@ def _call_llm(system_prompt: str, user_message: str) -> str:
             f"Invalid GEN_PROVIDER={provider!r}. Must be 'openai' or 'anthropic'."
         )
 
+    if not cfg["api_key"]:
+        raise RuntimeError(
+            "GEN_API_KEY environment variable is required for generate mode."
+        )
+
     if provider == "openai":
         from openai import OpenAI
 
