@@ -329,28 +329,28 @@ The evaluate subpackage is hardened against malformed, adversarial, or non-stand
 
 ## Workspace Management
 
-Run mode (`--mode run`) handles workspace setup, sanitization, and restoration automatically. The `scripts/reset_workspace.sh` script is a standalone alternative for manual workspace management outside of run mode.
+Run mode (`--mode run`) handles workspace setup, sanitization, and restoration automatically. The `toolkits/reset_workspace.sh` script is a standalone alternative for manual workspace management outside of run mode.
 
 ### Manual Script (optional)
 
 ```bash
 # 1. Prepare — clone, checkout base commit, sanitize history
-bash scripts/reset_workspace.sh prepare \
+bash toolkits/reset_workspace.sh prepare \
   --repo-url https://github.com/org/repo \
   --base-commit abc123 \
   --workspace ./workspaces/repo \
   --ground-truth ./patches/pr_42.patch
 
 # 2. Reset workspace to clean base state
-bash scripts/reset_workspace.sh reset --workspace ./workspaces/repo
+bash toolkits/reset_workspace.sh reset --workspace ./workspaces/repo
 
 # 3. Apply an agent-produced patch
-bash scripts/reset_workspace.sh apply \
+bash toolkits/reset_workspace.sh apply \
   --workspace ./workspaces/repo \
   --patch ./agent_output.patch
 
 # 4. Clean up workspace and metadata
-bash scripts/reset_workspace.sh cleanup --workspace ./workspaces/repo
+bash toolkits/reset_workspace.sh cleanup --workspace ./workspaces/repo
 ```
 
 ---
@@ -415,8 +415,19 @@ evaluation_scores/           # Output from evaluate mode
     pr_<id>_v1.json
     pr_<id>_v2.json
     pr_<id>_v3.json
-scripts/
+toolkits/
+  trajectory_visualizer/     # Trajectory profiling & visualization (Gradio UI)
+    __init__.py
+    __main__.py              # CLI entry point (python -m toolkits.trajectory_visualizer)
+    data.py                  # Data loading, parsing, aggregate metrics
+    analytics.py             # Per-step analytics, phase detection, insights
+    charts.py                # Plotly chart builders
+    rendering.py             # HTML/code rendering, card styles, workflow HTML
+    app.py                   # Gradio UI (build_ui, APP_CSS)
+    README.md                # Subpackage documentation
   reset_workspace.sh         # Workspace lifecycle (prepare/reset/apply/cleanup)
+  check_opencode_server.py   # OpenCode server health check & test
+  test_generate_patch.py     # End-to-end patch generation test
 .env.example                 # Environment variable template
 pyproject.toml               # Package metadata & dependencies
 ```
