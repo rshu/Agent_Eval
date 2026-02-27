@@ -40,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     shared = parser.add_argument_group("run / evaluate shared")
     shared.add_argument(
         "--gt-patch",
-        help="Ground truth patch file (run: reverse-applied for starting point; "
+        help="Ground truth patch — local file path or URL "
+             "(run: reverse-applied for starting point; "
              "evaluate: compared against agent patch)",
     )
 

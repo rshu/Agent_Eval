@@ -155,6 +155,51 @@ agent-eval --mode run \
 | `OPENCODE_MODEL` | — | Model override (`provider:model`, e.g. `openrouter:anthropic/claude-sonnet-4`) |
 | `OPENCODE_CONFIG_PATH` | `~/.config/opencode/config.json` | Path to OpenCode config file |
 
+### Running OpenCode Server
+
+Start the OpenCode server before running `agent-eval --mode run`:
+
+```bash
+opencode --print-logs --log-level DEBUG serve --hostname 127.0.0.1 --port 4096
+```
+
+The server listens on `http://127.0.0.1:4096` by default. Override the port via the OpenCode config or set `OPENCODE_BASE_URL` to point to a different address.
+
+### OpenCode Configuration
+
+The OpenCode config file (`~/.config/opencode/config.json`) defines LLM providers and model settings. Run mode reads this file to resolve the model for the coding agent.
+
+Example configuration using Zhipu AI:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "Zhipu AI Coding Plan/glm-5",
+  "provider": {
+    "Zhipu AI Coding Plan": {
+      "name": "Zhipu AI Coding Plan",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://api.z.ai/api/coding/paas/v4",
+        "apiKey": "{env:ZHIPU_API_KEY}"
+      },
+      "models": {
+        "glm-5": {
+          "name": "GLM-5"
+        }
+      }
+    }
+  }
+}
+```
+
+**Model resolution order:**
+
+1. `OPENCODE_MODEL` env var (e.g. `Zhipu AI Coding Plan:GLM-5`)
+2. `agent.build.model` field in config file
+3. First provider/model found in the `provider` block
+4. Server default model
+
 ### Output
 
 Patches and trajectories are written to fixed paths derived from the prompt file path:
@@ -215,7 +260,7 @@ Judge an agent-generated patch against the ground truth using an LLM.
 ```bash
 agent-eval --mode evaluate \
   --agent-patch generated_patches/patch/Hutool/pr_692_v1.patch \
-  --gt-patch patches/pr_692.patch \
+  --gt-patch https://gitee.com/chinabugotech/hutool/pulls/692.patch \
   --issue-statement prompt_variants/Hutool/pr_692_v1.md \
   --eval-output evaluation_scores/Hutool/pr_692_v1.json
 ```
@@ -261,6 +306,24 @@ A JSON object with verdict, scores, and analysis:
 | **FAIL** | Functional correctness ≤ 1, or overall ≤ 30 |
 | **PASS** | All scores high (A ≥ 4, B ≥ 4, C ≥ 3) and overall ≥ 70 |
 | **PARTIAL** | Everything else |
+
+### Security Hardening
+
+The evaluate subpackage is hardened against malformed, adversarial, or non-standard LLM responses. Defense-in-depth layers include:
+
+**Strict JSON parsing** — `_strict_loads()` rejects non-standard tokens (`NaN`, `Infinity`, `-Infinity`) via `parse_constant` and numeric overflow (e.g. `1e309` → inf) via `parse_float` with `math.isfinite()` guard. Final output uses `json.dumps(allow_nan=False)` as a safety net.
+
+**Multi-strategy JSON extraction** — LLM responses are parsed via three fallback strategies: (1) direct parse, (2) markdown code-block extraction, (3) per-brace `raw_decode` with skip-tracking. Nested objects inside already-parsed spans are skipped (`skip_until`). Malformed outer JSON uses brace-depth matching (`_find_matching_brace`) that respects string escaping to find the span boundary, preventing inner dicts from leaking as separate candidates. Unbalanced braces (unclosed strings) recover gracefully by advancing one character.
+
+**Schema-based candidate selection** — When multiple JSON objects are found, `_is_evaluation_result()` validates structural shape before first-match selection. Requires **all** of: verdict in `{PASS, PARTIAL, FAIL}` (case-insensitive), all three criterion keys (`functional_correctness`, `completeness_coverage`, `equivalence_to_ground_truth`) with numeric values, and `overall_score` as a finite number 0–100 (booleans excluded). Metadata or partial objects cannot pass schema and are never selected over a valid evaluation.
+
+**Prompt template injection prevention** — `format_prompt()` uses position-based substitution: all placeholder positions are found in the original template before any replacement occurs. This prevents user input containing placeholder tokens (e.g. `{GENERATED_PATCH}` inside issue text) from being expanded by later substitutions.
+
+**Score formula validation** — `_validate_scores()` requires all three criterion keys present before running the formula. Non-numeric values (strings, booleans, NaN, inf) bail out safely. Criteria are clamped to 0–5 before computing `overall_score`. Mismatched scores are corrected in-place.
+
+**CLI output guard** — The handler summary banner uses `_strict_loads()` (not permissive `json.loads`) and checks `isinstance(dict)` + `_is_evaluation_result()` before printing `[ok]`. Non-evaluation payloads, non-dict JSON, and NaN-containing responses emit `[warn]` instead.
+
+**Input and environment validation** — API key, issue statement, and both patches are validated non-empty. `--issue-statement` uses a file-vs-text heuristic (extension, path separators, whitespace) with warnings on ambiguous cases. `EVAL_TEMPERATURE` requires `math.isfinite()` and `>= 0`; `EVAL_MAX_TOKENS` requires positive integer. `model_name` and `provider` are type-checked with `isinstance`.
 
 ---
 
