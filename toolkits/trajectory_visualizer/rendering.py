@@ -9,6 +9,8 @@ from pygments import highlight as _pygments_highlight
 from pygments.formatters import HtmlFormatter as _HtmlFormatter
 from pygments.lexers import get_lexer_by_name as _get_lexer, TextLexer as _TextLexer
 
+from .styles import WORKFLOW_CSS
+
 
 _ROLE_COLORS = {
     "user": ("#dbeafe", "#1e40af", "User"),
@@ -45,7 +47,6 @@ _CODE_FENCE_RE = re.compile(
 
 
 _pygments_formatter = _HtmlFormatter(nowrap=True, style="github-dark")
-_pygments_css = _HtmlFormatter(style="github-dark").get_style_defs(".wf-code-hl")
 
 
 def _highlight_code(code: str, lang: str) -> str:
@@ -91,61 +92,7 @@ def render_workflow_html(steps: list[dict]) -> str:
     if not steps:
         return "<div style='padding:2em;color:#888;text-align:center;'>No steps to display.</div>"
 
-    css = """
-    <style>
-    .wf-scroll {
-        max-height: 75vh; overflow-y: auto; padding: 8px 4px 8px 0;
-        scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent;
-    }
-    .wf-scroll::-webkit-scrollbar { width: 6px; }
-    .wf-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-    .wf-container { font-family: system-ui, -apple-system, sans-serif; max-width: 680px; margin: 0 auto; }
-    .wf-card {
-        border: 2px solid #e5e7eb; border-radius: 10px; padding: 12px 16px;
-        cursor: pointer; transition: box-shadow 0.15s, transform 0.1s;
-        position: relative;
-    }
-    .wf-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.10); transform: translateY(-1px); }
-    .wf-card.wf-active { box-shadow: 0 0 0 3px rgba(59,130,246,0.4); }
-    .wf-connector {
-        width: 2px; height: 20px; background: linear-gradient(to bottom, #d1d5db, #e5e7eb);
-        margin: 0 auto;
-    }
-    .wf-badge {
-        display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 8px;
-        border-radius: 6px; margin-right: 6px; text-transform: uppercase; letter-spacing: 0.5px;
-    }
-    .wf-header { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-    .wf-meta { font-size: 11px; color: #6b7280; margin-top: 5px; display: flex; gap: 8px; flex-wrap: wrap; }
-    .wf-meta span { white-space: nowrap; }
-    .wf-preview {
-        font-size: 12px; color: #374151; margin-top: 6px;
-        white-space: pre-wrap; word-break: break-word;
-        line-height: 1.4;
-    }
-    .wf-code-block {
-        background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-        margin: 6px 0; overflow-x: auto; position: relative;
-    }
-    .wf-code-lang {
-        position: absolute; top: 4px; right: 8px;
-        font-size: 10px; color: #8b949e; text-transform: uppercase;
-        letter-spacing: 0.5px; user-select: none;
-    }
-    .wf-code-block pre {
-        margin: 0; padding: 10px 14px; overflow-x: auto;
-    }
-    .wf-code-block code {
-        font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Consolas', monospace;
-        font-size: 12px; line-height: 1.5; color: #c9d1d9;
-        white-space: pre; display: block;
-    }
-    /* Pygments syntax highlighting (github-dark) */
-    """ + _pygments_css + """
-    .wf-icons { font-size: 11px; color: #9ca3af; }
-    </style>
-    <!-- Click handling via Gradio js_on_load + trigger() -->
-    """
+    css = WORKFLOW_CSS
 
     cards_html = []
     for i, step in enumerate(steps):
@@ -173,20 +120,16 @@ def render_workflow_html(steps: list[dict]) -> str:
                 f'<span class="wf-badge" style="background:#dbeafe;color:#1e40af;'
                 f'border:1px solid #93c5fd;font-size:9px;">{html.escape(step["agent"])}</span>'
             )
-        cost_info = ''
-        step_cost = step.get("cost", 0) or 0
-        if step_cost > 0:
-            cost_info = f'<span style="color:#059669">${step_cost:.4f}</span>'
-
         role = step["role"]
         role_style = _ROLE_BADGE_STYLES.get(role, "background:#6b7280;color:white;")
         role_label = role.title()
 
+        orig_idx = step.get("index", i)
         card = f"""
-        <div class="wf-card" id="wf-card-{i}" data-step-idx="{i}"
+        <div class="wf-card" id="wf-card-{orig_idx}" data-step-idx="{orig_idx}"
              style="background:{bg};border-color:{border};">
             <div class="wf-header">
-                <span class="wf-badge" style="background:{border};color:white;">#{i}</span>
+                <span class="wf-badge" style="background:{border};color:white;">#{orig_idx}</span>
                 <span class="wf-badge" style="{role_style}">{role_label}</span>
                 <span class="wf-badge" style="background:transparent;color:{border};border:1px solid {border};">{label}</span>
                 {agent_badge}
@@ -195,7 +138,7 @@ def render_workflow_html(steps: list[dict]) -> str:
             <div class="wf-meta">
                 <span>{dur}</span>
                 <span>{tok} tok</span>
-                {cost_info}{tc_info}{err_info}
+                {tc_info}{err_info}
             </div>
             <div class="wf-preview">{preview}</div>
         </div>
@@ -219,22 +162,18 @@ def _fmt_timestamp(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def format_step_detail(step: dict) -> str:
-    """Format detail panel for a selected step as a single markdown string."""
+def _format_step_header(step: dict) -> str:
+    """Build the metadata table and token summary for a step detail panel."""
     _, _, label = _card_style(step)
 
-    # --- Build header rows conditionally ---
-    rows: list[tuple[str, str]] = []
-    rows.append(("Role", f"`{step['role']}`"))
-
-    if step.get("agent"):
-        rows.append(("Agent", f"`{step['agent']}`"))
-    if step.get("mode"):
-        rows.append(("Mode", f"`{step['mode']}`"))
-    if step.get("model_id"):
-        rows.append(("Model", f"`{step['model_id']}`"))
-    if step.get("provider_id"):
-        rows.append(("Provider", f"`{step['provider_id']}`"))
+    rows: list[tuple[str, str]] = [("Role", f"`{step['role']}`")]
+    _optional = [
+        ("agent", "Agent"), ("mode", "Mode"), ("model_id", "Model"),
+        ("provider_id", "Provider"),
+    ]
+    for key, field in _optional:
+        if step.get(key):
+            rows.append((field, f"`{step[key]}`"))
     if step.get("duration") is not None:
         rows.append(("Duration", f"{step['duration']}s"))
 
@@ -247,24 +186,20 @@ def format_step_detail(step: dict) -> str:
 
     if step.get("finish"):
         rows.append(("Finish", f"`{step['finish']}`"))
-    if step.get("cost"):
-        rows.append(("Cost", f"${step['cost']:.4f}"))
     if step["tool_call_count"] > 0:
         rows.append(("Tool calls", str(step["tool_call_count"])))
     if step["error_count"] > 0:
         rows.append(("Errors", str(step["error_count"])))
-    if step.get("id"):
-        rows.append(("ID", f"`{step['id']}`"))
-    if step.get("parent_id"):
-        rows.append(("Parent ID", f"`{step['parent_id']}`"))
-    if step.get("session_id"):
-        rows.append(("Session", f"`{step['session_id']}`"))
-    if step.get("cwd"):
-        rows.append(("CWD", f"`{step['cwd']}`"))
+
+    _id_fields = [
+        ("id", "ID"), ("parent_id", "Parent ID"), ("session_id", "Session"),
+        ("cwd", "CWD"), ("message_id", "Message ID"),
+    ]
+    for key, field in _id_fields:
+        if step.get(key):
+            rows.append((field, f"`{step[key]}`"))
     if step.get("root") and step.get("root") != step.get("cwd"):
         rows.append(("Root", f"`{step['root']}`"))
-    if step.get("message_id"):
-        rows.append(("Message ID", f"`{step['message_id']}`"))
 
     table_lines = [
         f"### Step {step['index']} \u2014 {label}",
@@ -273,7 +208,6 @@ def format_step_detail(step: dict) -> str:
     ]
     for field, value in rows:
         table_lines.append(f"| {field} | {value} |")
-    header = "\n".join(table_lines) + "\n"
 
     tok = step["tokens"]
     tokens_str = (
@@ -283,8 +217,83 @@ def format_step_detail(step: dict) -> str:
         f"{tok.get('reasoning', 0):,} | {tok.get('cache_read', 0):,} | "
         f"{tok.get('cache_write', 0):,} | {tok.get('total', 0):,} |"
     )
+    return "\n".join(table_lines) + "\n\n" + tokens_str
 
-    # --- Content parts ---
+
+def _format_tool_call_detail(p: dict) -> str:
+    """Render a single tool_call part as a markdown block."""
+    inp = p.get("input", {})
+    out = p.get("output", "")
+    inp_str = json.dumps(inp, indent=2, ensure_ascii=False) if isinstance(inp, dict) else str(inp)
+    if isinstance(out, str) and len(out) > 2000:
+        out = out[:2000] + "\n... (truncated)"
+    elif isinstance(out, dict):
+        out = json.dumps(out, indent=2, ensure_ascii=False)
+        if len(out) > 2000:
+            out = out[:2000] + "\n... (truncated)"
+
+    tc_dur = ""
+    if p.get("time_start") and p.get("time_end"):
+        tc_dur = f" \u2014 {round((p['time_end'] - p['time_start']) / 1000, 2)}s"
+
+    meta_parts: list[str] = []
+    tool_id = p.get("tool_id", "")
+    if tool_id:
+        meta_parts.append(f"`{tool_id}`")
+    tc_meta = p.get("metadata") or {}
+    handled = {"output", "input", "preview"}
+    if isinstance(tc_meta, dict):
+        if tc_meta.get("sessionId"):
+            sid = str(tc_meta["sessionId"])
+            meta_parts.append(f"Session: `{sid[:16]}\u2026`" if len(sid) > 16 else f"Session: `{sid}`")
+            handled.add("sessionId")
+        meta_model = tc_meta.get("model")
+        if isinstance(meta_model, dict):
+            if meta_model.get("modelID"):
+                meta_parts.append(f"Model: `{meta_model['modelID']}`")
+            if meta_model.get("providerID"):
+                meta_parts.append(f"Provider: `{meta_model['providerID']}`")
+            handled.add("model")
+        elif meta_model:
+            meta_parts.append(f"Model: `{meta_model}`")
+            handled.add("model")
+        if tc_meta.get("truncated"):
+            meta_parts.append("truncated")
+        handled.add("truncated")
+        for mk, mv in tc_meta.items():
+            if mk in handled or mv is None or mv == "" or mv == {} or mv == []:
+                continue
+            if isinstance(mv, (list, dict)):
+                continue
+            if isinstance(mv, str) and len(mv) > 60:
+                mv = mv[:57] + "..."
+            meta_parts.append(f"{mk}: `{mv}`")
+    if isinstance(inp, dict) and inp.get("subagent_type"):
+        meta_parts.append(f"Subagent: `{inp['subagent_type']}`")
+
+    meta_line = (" \u00b7 ".join(meta_parts) + "\n\n") if meta_parts else ""
+
+    error_block = ""
+    tc_error = p.get("error")
+    if tc_error:
+        err_str = tc_error if isinstance(tc_error, str) else json.dumps(tc_error, indent=2, ensure_ascii=False)
+        error_block = f"\n\n<details><summary>Error</summary>\n\n```\n{err_str}\n```\n</details>\n"
+
+    return (
+        f"#### Tool: `{p.get('tool_name', '?')}` \u2014 "
+        f"`{p.get('status', '?')}`{tc_dur}\n\n"
+        f"**{p.get('title') or 'Untitled'}**\n\n"
+        f"{meta_line}"
+        f"<details><summary>Input</summary>\n\n```json\n{inp_str}\n```\n</details>\n\n"
+        f"<details><summary>Output</summary>\n\n```\n{out}\n```\n</details>"
+        f"{error_block}\n"
+    )
+
+
+def format_step_detail(step: dict) -> str:
+    """Format detail panel for a selected step as a single markdown string."""
+    header = _format_step_header(step)
+
     content_parts = []
     for p in step["parts"]:
         ptype = p.get("type", "unknown")
@@ -293,89 +302,9 @@ def format_step_detail(step: dict) -> str:
         elif ptype == "reasoning":
             content_parts.append(f"#### Reasoning\n\n{p.get('text', '')}\n")
         elif ptype == "tool_call":
-            inp = p.get("input", {})
-            out = p.get("output", "")
-            if isinstance(inp, dict):
-                inp_str = json.dumps(inp, indent=2, ensure_ascii=False)
-            else:
-                inp_str = str(inp)
-            if isinstance(out, str) and len(out) > 2000:
-                out = out[:2000] + "\n... (truncated)"
-            elif isinstance(out, dict):
-                out = json.dumps(out, indent=2, ensure_ascii=False)
-                if len(out) > 2000:
-                    out = out[:2000] + "\n... (truncated)"
-
-            tc_dur = ""
-            if p.get("time_start") and p.get("time_end"):
-                tc_dur = f" \u2014 {round((p['time_end'] - p['time_start']) / 1000, 2)}s"
-
-            # Metadata line: tool_id + metadata dict entries
-            meta_parts: list[str] = []
-            tool_id = p.get("tool_id", "")
-            if tool_id:
-                meta_parts.append(f"`{tool_id}`")
-            tc_meta = p.get("metadata") or {}
-            # Keys already rendered or that duplicate state-level fields
-            _handled_meta_keys = {"output", "input", "preview"}
-            if isinstance(tc_meta, dict):
-                if tc_meta.get("sessionId"):
-                    sid = str(tc_meta["sessionId"])
-                    meta_parts.append(f"Session: `{sid[:16]}\u2026`" if len(sid) > 16 else f"Session: `{sid}`")
-                    _handled_meta_keys.add("sessionId")
-                meta_model = tc_meta.get("model")
-                if isinstance(meta_model, dict):
-                    mid = meta_model.get("modelID", "")
-                    pid = meta_model.get("providerID", "")
-                    if mid:
-                        meta_parts.append(f"Model: `{mid}`")
-                    if pid:
-                        meta_parts.append(f"Provider: `{pid}`")
-                    _handled_meta_keys.add("model")
-                elif meta_model:
-                    meta_parts.append(f"Model: `{meta_model}`")
-                    _handled_meta_keys.add("model")
-                if tc_meta.get("truncated"):
-                    meta_parts.append("truncated")
-                _handled_meta_keys.add("truncated")
-                # Show remaining metadata keys generically (scalars only)
-                for mk, mv in tc_meta.items():
-                    if mk in _handled_meta_keys:
-                        continue
-                    if mv is None or mv == "" or mv == {} or mv == []:
-                        continue
-                    # Skip complex structures — they're in Input/Output
-                    if isinstance(mv, (list, dict)):
-                        continue
-                    # Truncate long strings to keep metadata line readable
-                    if isinstance(mv, str) and len(mv) > 60:
-                        mv = mv[:57] + "..."
-                    meta_parts.append(f"{mk}: `{mv}`")
-            # subagent_type from input
-            if isinstance(inp, dict) and inp.get("subagent_type"):
-                meta_parts.append(f"Subagent: `{inp['subagent_type']}`")
-
-            meta_line = ""
-            if meta_parts:
-                meta_line = " \u00b7 ".join(meta_parts) + "\n\n"
-
-            error_block = ""
-            tc_error = p.get("error")
-            if tc_error:
-                err_str = tc_error if isinstance(tc_error, str) else json.dumps(tc_error, indent=2, ensure_ascii=False)
-                error_block = f"\n\n<details><summary>Error</summary>\n\n```\n{err_str}\n```\n</details>\n"
-
-            content_parts.append(
-                f"#### Tool: `{p.get('tool_name', '?')}` \u2014 "
-                f"`{p.get('status', '?')}`{tc_dur}\n\n"
-                f"**{p.get('title') or 'Untitled'}**\n\n"
-                f"{meta_line}"
-                f"<details><summary>Input</summary>\n\n```json\n{inp_str}\n```\n</details>\n\n"
-                f"<details><summary>Output</summary>\n\n```\n{out}\n```\n</details>"
-                f"{error_block}\n"
-            )
+            content_parts.append(_format_tool_call_detail(p))
         elif ptype in ("step_start", "step_finish"):
-            pass  # skip noise in detail view
+            pass
         elif ptype == "snapshot":
             content_parts.append("#### Snapshot\n\n*(data omitted)*\n")
         elif ptype == "patch":
@@ -399,4 +328,4 @@ def format_step_detail(step: dict) -> str:
             content_parts.append(f"#### {ptype}\n")
 
     content = "\n---\n".join(content_parts) if content_parts else "*No content*"
-    return header + "\n" + tokens_str + "\n\n" + content
+    return header + "\n\n" + content

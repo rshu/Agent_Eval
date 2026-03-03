@@ -5,23 +5,126 @@ import statistics
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from .data import infer_non_cache_input
 from .rendering import _card_style
 
 
-def build_token_chart(steps: list[dict], cumulative: bool = False) -> go.Figure:
+# -- Layout helpers -------------------------------------------------------
+
+def _empty_figure(height: int = 380, message: str | None = None) -> go.Figure:
+    """Return a blank Plotly figure, optionally with a centered message."""
+    fig = go.Figure()
+    if message:
+        fig.add_annotation(text=message, xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False, font_size=16)
+    fig.update_layout(template="plotly_white", height=height)
+    return fig
+
+
+def _apply_chart_layout(fig: go.Figure, title: str,
+                         xaxis: str | None = None, yaxis: str | None = None,
+                         height: int = 380, **kwargs) -> None:
+    """Apply standard chart layout (plotly_white template + margins)."""
+    layout = dict(
+        title=title,
+        template="plotly_white",
+        height=height,
+        margin=dict(t=50, b=40, l=60, r=20),
+    )
+    if xaxis:
+        layout["xaxis_title"] = xaxis
+    if yaxis:
+        layout["yaxis_title"] = yaxis
+    layout.update(kwargs)
+    fig.update_layout(**layout)
+
+
+# -- Annotation utilities ------------------------------------------------
+
+_PHASE_COLORS = {"Boot": "rgba(59,130,246,0.10)", "Steady": "rgba(16,185,129,0.08)",
+                 "Closeout": "rgba(245,158,11,0.10)", "Full Run": "rgba(107,114,128,0.06)"}
+_PHASE_LINE_COLORS = {"Boot": "#3b82f6", "Steady": "#10b981",
+                      "Closeout": "#f59e0b", "Full Run": "#6b7280"}
+
+
+def _detect_outliers(values: list[float], threshold: float = 2.0) -> list[tuple[int, float, str]]:
+    """Return (index, value, label) for values exceeding *threshold* σ from mean.
+
+    Returns empty list if fewer than 10 values or no outliers found.
+    """
+    if len(values) < 10:
+        return []
+    clean = [v for v in values if v is not None and v > 0]
+    if len(clean) < 5:
+        return []
+    mean = statistics.mean(clean)
+    stdev = statistics.stdev(clean) if len(clean) > 1 else 0
+    if stdev == 0:
+        return []
+    outliers = []
+    for i, v in enumerate(values):
+        if v is not None and v > 0 and (v - mean) > threshold * stdev:
+            outliers.append((i, v, "spike"))
+    return outliers
+
+
+def add_phase_overlays(fig: go.Figure, phases: list[dict] | None, step_count: int) -> None:
+    """Draw semi-transparent vertical regions for each detected phase."""
+    if not phases or len(phases) <= 1:
+        return
+    for p in phases:
+        color = _PHASE_COLORS.get(p["name"], "rgba(107,114,128,0.06)")
+        line_color = _PHASE_LINE_COLORS.get(p["name"], "#6b7280")
+        fig.add_vrect(
+            x0=p["start_idx"] - 0.5, x1=p["end_idx"] + 0.5,
+            fillcolor=color, layer="below", line_width=0,
+        )
+        fig.add_annotation(
+            x=(p["start_idx"] + p["end_idx"]) / 2, y=1.0,
+            yref="paper", text=p["name"],
+            showarrow=False, font=dict(size=10, color=line_color),
+            yanchor="bottom",
+        )
+
+
+def _add_outlier_annotations(fig: go.Figure, outliers: list[tuple[int, float, str]],
+                             fmt: str = ",.0f", suffix: str = "") -> None:
+    """Add annotation arrows for detected outlier points."""
+    for idx, val, label in outliers[:5]:  # cap at 5 to avoid clutter
+        fig.add_annotation(
+            x=idx, y=val,
+            text=f"{label}: {val:{fmt}}{suffix}",
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1,
+            arrowcolor="#dc2626", font=dict(size=9, color="#dc2626"),
+            ax=0, ay=-30,
+        )
+
+
+# -- Chart builders -------------------------------------------------------
+
+def build_token_chart(steps: list[dict], cumulative: bool = False,
+                      step_analytics: list[dict] | None = None,
+                      phases: list[dict] | None = None) -> go.Figure:
     """Stacked bar of token breakdown over steps (non-overlapping segments).
 
-    Segments: fresh_input (input - cache_read) + cache_read
+    Segments: fresh_input + cache_read
               + net_output (output - reasoning) + reasoning = total
     """
     if not steps:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=380)
-        return fig
+        return _empty_figure(380)
 
     indices = list(range(len(steps)))
     cache_r = [s["tokens"]["cache_read"] for s in steps]
-    fresh_input = [max(0, s["tokens"]["input"] - s["tokens"]["cache_read"]) for s in steps]
+    fresh_input = [
+        infer_non_cache_input(
+            total_tokens=s["tokens"]["total"],
+            input_tokens=s["tokens"]["input"],
+            output_tokens=s["tokens"]["output"],
+            reasoning_tokens=s["tokens"]["reasoning"],
+            cache_read_tokens=s["tokens"]["cache_read"],
+        )
+        for s in steps
+    ]
     reasoning_t = [s["tokens"]["reasoning"] for s in steps]
     net_output = [max(0, s["tokens"]["output"] - s["tokens"]["reasoning"]) for s in steps]
 
@@ -40,25 +143,26 @@ def build_token_chart(steps: list[dict], cumulative: bool = False) -> go.Figure:
     fig.add_trace(go.Bar(x=indices, y=reasoning_t, name="Reasoning",
                          marker_color="#8b5cf6"))
 
-    fig.update_layout(
+    _apply_chart_layout(
+        fig, "Token Usage by Step" + (" (Cumulative)" if cumulative else ""),
+        xaxis="Step", yaxis="Tokens", height=380,
         barmode="stack",
-        title="Token Usage by Step" + (" (Cumulative)" if cumulative else ""),
-        xaxis_title="Step",
-        yaxis_title="Tokens",
-        template="plotly_white",
-        height=380,
-        margin=dict(t=50, b=40, l=60, r=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
+    if not cumulative:
+        totals = [s["tokens"]["total"] for s in steps]
+        outliers = _detect_outliers(totals)
+        _add_outlier_annotations(fig, outliers, fmt=",.0f", suffix=" tok")
+    add_phase_overlays(fig, phases, len(steps))
     return fig
 
 
-def build_duration_chart(steps: list[dict]) -> go.Figure:
+def build_duration_chart(steps: list[dict],
+                         step_analytics: list[dict] | None = None,
+                         phases: list[dict] | None = None) -> go.Figure:
     """Bar chart of step durations with average line."""
     if not steps:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=380)
-        return fig
+        return _empty_figure(380)
 
     indices = list(range(len(steps)))
     durations = [s["duration"] if s["duration"] is not None else 0 for s in steps]
@@ -74,14 +178,10 @@ def build_duration_chart(steps: list[dict]) -> go.Figure:
                          showlegend=False))
     fig.add_hline(y=avg_d, line_dash="dash", line_color="#dc2626",
                   annotation_text=f"Avg: {avg_d:.1f}s")
-    fig.update_layout(
-        title="Step Duration",
-        xaxis_title="Step",
-        yaxis_title="Seconds",
-        template="plotly_white",
-        height=380,
-        margin=dict(t=50, b=40, l=60, r=20),
-    )
+    _apply_chart_layout(fig, "Step Duration", xaxis="Step", yaxis="Seconds", height=380)
+    outliers = _detect_outliers(durations)
+    _add_outlier_annotations(fig, outliers, fmt=".1f", suffix="s")
+    add_phase_overlays(fig, phases, len(steps))
     return fig
 
 
@@ -94,11 +194,7 @@ def build_tool_chart(steps: list[dict]) -> go.Figure:
             breakdown[name] = breakdown.get(name, 0) + 1
 
     if not breakdown:
-        fig = go.Figure()
-        fig.add_annotation(text="No tool calls", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False, font_size=16)
-        fig.update_layout(template="plotly_white", height=300)
-        return fig
+        return _empty_figure(300, "No tool calls")
 
     sorted_items = sorted(breakdown.items(), key=lambda x: x[1])
     names = [x[0] for x in sorted_items]
@@ -109,22 +205,20 @@ def build_tool_chart(steps: list[dict]) -> go.Figure:
         y=names, x=counts, orientation="h", marker_color="#6366f1",
         text=counts, textposition="outside",
     ))
-    fig.update_layout(
-        title="Tool Call Frequency",
-        xaxis_title="Count",
-        template="plotly_white",
+    _apply_chart_layout(
+        fig, "Tool Call Frequency", xaxis="Count",
         height=max(250, 50 * len(names)),
         margin=dict(l=max(120, max(len(n) for n in names) * 8), r=40, t=50, b=40),
     )
     return fig
 
 
-def build_cache_ratio_chart(rows: list[dict]) -> go.Figure:
+def build_cache_ratio_chart(rows: list[dict],
+                            step_analytics: list[dict] | None = None,
+                            phases: list[dict] | None = None) -> go.Figure:
     """Bar chart of cache-read ratio (%) per step."""
     if not rows:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=320)
-        return fig
+        return _empty_figure(320)
 
     indices = [r["index"] for r in rows]
     ratios = [r["cache_ratio"] * 100 for r in rows]
@@ -141,23 +235,18 @@ def build_cache_ratio_chart(rows: list[dict]) -> go.Figure:
     ))
     fig.add_hline(y=avg_ratio, line_dash="dash", line_color="#dc2626",
                   annotation_text=f"Avg: {avg_ratio:.1f}%")
-    fig.update_layout(
-        title="Cache-Read Ratio by Step",
-        xaxis_title="Step",
-        yaxis_title="Cache ratio (%)",
-        template="plotly_white",
-        height=320,
-        margin=dict(t=50, b=40, l=60, r=20),
-    )
+    _apply_chart_layout(fig, "Cache-Read Ratio by Step", xaxis="Step",
+                         yaxis="Cache ratio (%)", height=320)
+    add_phase_overlays(fig, phases, len(rows))
     return fig
 
 
-def build_efficiency_chart(rows: list[dict]) -> go.Figure:
+def build_efficiency_chart(rows: list[dict],
+                           step_analytics: list[dict] | None = None,
+                           phases: list[dict] | None = None) -> go.Figure:
     """Tokens/sec and tool-wait share per step (behavior efficiency view)."""
     if not rows:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=340)
-        return fig
+        return _empty_figure(340)
 
     indices = [r["index"] for r in rows]
     tok_s = [r["tokens_per_sec"] for r in rows]
@@ -200,16 +289,15 @@ def build_efficiency_chart(rows: list[dict]) -> go.Figure:
         ),
         secondary_y=True,
     )
-    fig.update_layout(
-        title="Per-Step Efficiency (Throughput vs Tool Wait)",
-        template="plotly_white",
-        height=340,
-        margin=dict(t=50, b=40, l=60, r=60),
+    _apply_chart_layout(
+        fig, "Per-Step Efficiency (Throughput vs Tool Wait)",
+        height=340, margin=dict(t=50, b=40, l=60, r=60),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
     fig.update_xaxes(title_text="Step")
     fig.update_yaxes(title_text="Tokens / second", secondary_y=False)
     fig.update_yaxes(title_text="Tool-wait (%)", secondary_y=True)
+    add_phase_overlays(fig, phases, len(rows))
     return fig
 
 
@@ -218,9 +306,7 @@ def build_analytics_heatmap(
 ) -> go.Figure:
     """Heatmap of per-step metrics normalized 0\u20131 per row."""
     if not analytics:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=300)
-        return fig
+        return _empty_figure(300)
 
     metric_keys = [
         "cache_ratio", "tool_time_share", "tok_per_s", "out_in_ratio",
@@ -279,13 +365,9 @@ def build_analytics_heatmap(
                     annotation_position="top",
                 )
 
-    fig.update_layout(
-        title="Behavioral Heatmap (normalized per metric)",
-        xaxis_title="Step",
-        template="plotly_white",
-        height=360,
-        margin=dict(t=50, b=40, l=120, r=20),
-    )
+    _apply_chart_layout(fig, "Behavioral Heatmap (normalized per metric)",
+                         xaxis="Step", height=360,
+                         margin=dict(t=50, b=40, l=120, r=20))
     return fig
 
 
@@ -294,9 +376,7 @@ def build_phase_chart(
 ) -> go.Figure:
     """Stacked horizontal bar showing phases proportional to step count."""
     if not phases:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=200)
-        return fig
+        return _empty_figure(200)
 
     colors = {
         "Boot": "#ef4444", "Steady": "#3b82f6",
@@ -319,82 +399,21 @@ def build_phase_chart(
             hoverinfo="text",
         ))
 
-    fig.update_layout(
-        barmode="stack",
-        title="Phase Timeline",
-        xaxis_title="Steps",
-        template="plotly_white",
-        height=200,
-        margin=dict(t=50, b=40, l=60, r=20),
-        showlegend=True,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="center", x=0.5),
+    _apply_chart_layout(
+        fig, "Phase Timeline", xaxis="Steps", height=200,
+        barmode="stack", showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="center", x=0.5),
     )
     return fig
 
 
-def build_cost_chart(rows: list[dict]) -> go.Figure:
-    """Per-step cost bar + cumulative cost line (dual-axis)."""
-    if not rows:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=340)
-        return fig
-
-    indices = [r["index"] for r in rows]
-    costs = [r.get("cost", 0) or 0 for r in rows]
-
-    if not any(c > 0 for c in costs):
-        fig = go.Figure()
-        fig.add_annotation(text="No cost data", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False, font_size=16)
-        fig.update_layout(template="plotly_white", height=340)
-        return fig
-
-    cum_cost = []
-    running = 0.0
-    for c in costs:
-        running += c
-        cum_cost.append(round(running, 6))
-
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Bar(
-            x=indices, y=costs, name="Step Cost",
-            marker_color="#f59e0b", opacity=0.6,
-            hovertemplate="Step %{x}<br>Cost: $%{y:.4f}<extra></extra>",
-        ),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=indices, y=cum_cost, name="Cumulative",
-            mode="lines+markers",
-            line=dict(color="#dc2626", width=2),
-            marker=dict(size=5),
-            hovertemplate="Step %{x}<br>Total: $%{y:.4f}<extra></extra>",
-        ),
-        secondary_y=True,
-    )
-    fig.update_layout(
-        title="Cost per Step",
-        template="plotly_white",
-        height=340,
-        margin=dict(t=50, b=40, l=60, r=60),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-    )
-    fig.update_yaxes(title_text="Step Cost ($)", secondary_y=False)
-    fig.update_yaxes(title_text="Cumulative ($)", secondary_y=True)
-    fig.update_xaxes(title_text="Step")
-    return fig
-
-
-def build_context_growth_chart(rows: list[dict]) -> go.Figure:
+def build_context_growth_chart(rows: list[dict],
+                               step_analytics: list[dict] | None = None,
+                               phases: list[dict] | None = None) -> go.Figure:
     """Cumulative input tokens (context pressure) with cache-read overlay."""
     if not rows:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=340)
-        return fig
+        return _empty_figure(340)
 
     indices = [r["index"] for r in rows]
     cum_input = []
@@ -404,7 +423,8 @@ def build_context_growth_chart(rows: list[dict]) -> go.Figure:
     for r in rows:
         ri += r.get("tokens_input", 0)
         cache_read = r.get("cache_read", 0)
-        rf += max(0, r.get("tokens_input", 0) - cache_read)
+        # rows["non_cache_tokens"] is already schema-normalized in build_message_metrics()
+        rf += r.get("non_cache_tokens", 0)
         rc += cache_read
         cum_input.append(ri)
         cum_fresh.append(rf)
@@ -433,15 +453,12 @@ def build_context_growth_chart(rows: list[dict]) -> go.Figure:
         marker=dict(size=4),
         hovertemplate="Step %{x}<br>Cumul. Cache: %{y:,}<extra></extra>",
     ))
-    fig.update_layout(
-        title="Context Growth (Cumulative Input Tokens)",
-        xaxis_title="Step",
-        yaxis_title="Tokens",
-        template="plotly_white",
-        height=340,
-        margin=dict(t=50, b=40, l=60, r=20),
+    _apply_chart_layout(
+        fig, "Context Growth (Cumulative Input Tokens)",
+        xaxis="Step", yaxis="Tokens", height=340,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
+    add_phase_overlays(fig, phases, len(rows))
     return fig
 
 
@@ -458,11 +475,7 @@ def build_tool_duration_chart(steps: list[dict]) -> go.Figure:
                 tool_durs[tc["tool_name"]].append((te - ts) / 1000.0)
 
     if not tool_durs:
-        fig = go.Figure()
-        fig.add_annotation(text="No tool duration data", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False, font_size=16)
-        fig.update_layout(template="plotly_white", height=300)
-        return fig
+        return _empty_figure(300, "No tool duration data")
 
     sorted_tools = sorted(tool_durs.keys(),
                           key=lambda t: statistics.mean(tool_durs[t]), reverse=True)
@@ -482,12 +495,10 @@ def build_tool_duration_chart(steps: list[dict]) -> go.Figure:
     fig.add_trace(go.Bar(y=names, x=maxs, name="Max", orientation="h",
                          marker_color="#ef4444", text=[f"{v:.2f}s" for v in maxs],
                          textposition="outside"))
-    fig.update_layout(
+    _apply_chart_layout(
+        fig, "Tool Duration by Type (Avg / P95 / Max)",
+        xaxis="Seconds", height=max(280, 60 * len(names)),
         barmode="group",
-        title="Tool Duration by Type (Avg / P95 / Max)",
-        xaxis_title="Seconds",
-        template="plotly_white",
-        height=max(280, 60 * len(names)),
         margin=dict(l=max(120, max(len(n) for n in names) * 8), r=50, t=50, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
@@ -497,9 +508,7 @@ def build_tool_duration_chart(steps: list[dict]) -> go.Figure:
 def build_idle_gap_chart(analytics: list[dict]) -> go.Figure:
     """Bar chart of idle gaps between consecutive steps."""
     if not analytics:
-        fig = go.Figure()
-        fig.update_layout(template="plotly_white", height=300)
-        return fig
+        return _empty_figure(300)
 
     indices = []
     gaps = []
@@ -510,11 +519,7 @@ def build_idle_gap_chart(analytics: list[dict]) -> go.Figure:
             gaps.append(g)
 
     if not gaps or not any(g > 0 for g in gaps):
-        fig = go.Figure()
-        fig.add_annotation(text="No idle gap data", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False, font_size=16)
-        fig.update_layout(template="plotly_white", height=300)
-        return fig
+        return _empty_figure(300, "No idle gap data")
 
     avg_gap = statistics.mean(gaps) if gaps else 0
 
@@ -526,12 +531,6 @@ def build_idle_gap_chart(analytics: list[dict]) -> go.Figure:
     ))
     fig.add_hline(y=avg_gap, line_dash="dash", line_color="#dc2626",
                   annotation_text=f"Avg: {avg_gap:.2f}s")
-    fig.update_layout(
-        title="Idle Gaps Between Steps",
-        xaxis_title="Step",
-        yaxis_title="Gap (seconds)",
-        template="plotly_white",
-        height=300,
-        margin=dict(t=50, b=40, l=60, r=20),
-    )
+    _apply_chart_layout(fig, "Idle Gaps Between Steps", xaxis="Step",
+                         yaxis="Gap (seconds)", height=300)
     return fig

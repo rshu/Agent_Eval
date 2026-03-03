@@ -10,116 +10,80 @@ import pandas as pd
 
 from .data import (
     load_trajectory, parse_steps, build_message_metrics, compute_metrics,
-    discover_trajectory_files, _fmt_dict_as_table, _build_hotspots_md,
-    _build_per_message_md,
+    discover_trajectory_files, _build_hotspots_md,
+    _build_per_message_md, compute_health_verdict,
+    format_session_md, format_performance_md,
+    format_behavioral_md, format_output_md,
+    extract_agent_info, build_analytics_dataframe,
+    wall_clock_fmt, format_banner_html,
 )
 from .analytics import compute_step_analytics, detect_phases, generate_insights
 from .charts import (
     build_token_chart, build_duration_chart, build_tool_chart,
     build_cache_ratio_chart, build_efficiency_chart,
     build_analytics_heatmap, build_phase_chart,
-    build_cost_chart, build_context_growth_chart,
+    build_context_growth_chart,
     build_tool_duration_chart, build_idle_gap_chart,
 )
 from .rendering import render_workflow_html, format_step_detail
+from .styles import APP_CSS
 
 
-APP_CSS = """
-:root {
-    --ov-bg: #f6f8fc;
-    --ov-card: #ffffff;
-    --ov-border: #dce3ef;
-    --ov-text: #0f172a;
-    --ov-muted: #5b6473;
-    --ov-accent: #1d4ed8;
-    --ov-success: #059669;
-    --ov-warn: #b45309;
-}
-.summary-banner {
-    background: linear-gradient(135deg, #eaf2ff 0%, #effbf4 55%, #fffaf0 100%);
-    border: 1px solid #c7d7f6;
-    border-radius: 14px;
-    box-shadow: 0 8px 20px rgba(24, 47, 89, 0.08);
-    padding: 16px 24px;
-    margin-bottom: 14px;
-}
-.summary-banner p { margin: 2px 0 !important; }
-.overview-card {
-    background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
-    border: 1px solid var(--ov-border);
-    border-radius: 12px;
-    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
-    padding: 14px 16px;
-    min-height: 210px;
-}
-.overview-card h3,
-.overview-card h4 {
-    color: var(--ov-text);
-    margin-top: 0.1em;
-}
-.overview-card p,
-.overview-card li,
-.overview-card td {
-    color: #1f2937;
-}
-.overview-card code {
-    background: #eef3ff;
-    border: 1px solid #dbe5ff;
-    border-radius: 5px;
-    padding: 1px 5px;
-}
-.overview-kpi-strip {
-    margin: 4px 0 14px 0;
-}
-.ov-kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 10px;
-}
-.ov-kpi-card {
-    background: var(--ov-card);
-    border: 1px solid var(--ov-border);
-    border-radius: 12px;
-    padding: 12px 12px 10px;
-    box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04);
-}
-.ov-kpi-label {
-    color: var(--ov-muted);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.7px;
-    font-weight: 700;
-    margin-bottom: 5px;
-}
-.ov-kpi-value {
-    color: var(--ov-text);
-    font-size: 23px;
-    font-weight: 700;
-    line-height: 1.1;
-}
-.ov-kpi-sub {
-    color: var(--ov-muted);
-    font-size: 12px;
-    margin-top: 4px;
-}
-.chart-control {
-    background: #f3f6ff;
-    border: 1px solid #dbe5ff;
-    border-radius: 10px;
-    padding: 10px 12px 0;
-    margin: 2px 0 8px;
-}
-.per-message-acc {
-    border: 1px solid var(--ov-border);
-    border-radius: 12px;
-    background: #ffffff;
-}
-.detail-panel {
-    position: sticky; top: 12px;
-    max-height: 78vh; overflow-y: auto;
-    scrollbar-width: thin;
-}
-"""
+def _map_insights_to_sections(insights: list[str]) -> dict[str, list[str]]:
+    """Categorize insight strings into Performance / Efficiency / Tools sections."""
+    sections: dict[str, list[str]] = {"performance": [], "efficiency": [], "tools": []}
+    perf_kw = ("slow turn", "latency", "duration", "token turn", "token count", "largest token")
+    eff_kw = ("context escalation", "cache behavior", "cache_ratio", "non-decreasing")
+    tool_kw = ("tool-heavy", "tool_time", "tool repetition", "retrying", "stuck")
+    for ins in insights:
+        low = ins.lower()
+        if any(k in low for k in perf_kw):
+            sections["performance"].append(ins)
+        elif any(k in low for k in eff_kw):
+            sections["efficiency"].append(ins)
+        elif any(k in low for k in tool_kw):
+            sections["tools"].append(ins)
+        else:
+            sections["performance"].append(ins)
+    return sections
+
+
+def _build_insight_callout_html(insights: list[str], max_items: int = 2) -> str:
+    """Render up to *max_items* insight callouts as styled HTML."""
+    if not insights:
+        return ""
+    items = []
+    for ins in insights[:max_items]:
+        items.append(
+            f"<div class='insight-callout'>"
+            f"<span class='insight-icon'>&#9432;</span> "
+            f"<span class='insight-text'>{html.escape(ins)}</span>"
+            f"</div>"
+        )
+    return "".join(items)
+
+
+def _build_health_verdict_html(verdicts: list[dict]) -> str:
+    """Render health verdict as a horizontal strip of color-coded badges."""
+    if not verdicts:
+        return ""
+    status_colors = {
+        "good": ("#059669", "#d1fae5", "#065f46"),
+        "warn": ("#d97706", "#fef3c7", "#92400e"),
+        "bad": ("#dc2626", "#fee2e2", "#991b1b"),
+    }
+    badges = []
+    for v in verdicts:
+        bg, bg_light, text_color = status_colors.get(v["status"], ("#6b7280", "#f3f4f6", "#374151"))
+        detail_escaped = html.escape(v["detail"])
+        badges.append(
+            f"<div class='hv-badge' style='background:{bg_light};border:1px solid {bg};' title='{detail_escaped}'>"
+            f"<span class='hv-dot' style='background:{bg};'></span>"
+            f"<span class='hv-metric' style='color:{text_color};'>{html.escape(v['metric'])}</span>"
+            f"<span class='hv-label' style='color:{text_color};'>{html.escape(v['label'])}</span>"
+            f"</div>"
+        )
+    return "<div class='hv-strip'>" + "".join(badges) + "</div>"
 
 
 def _build_overview_kpi_html(metrics: dict, wall_fmt: str) -> str:
@@ -137,8 +101,6 @@ def _build_overview_kpi_html(metrics: dict, wall_fmt: str) -> str:
          f"{metrics.get('cache_dominant_steps', 0)} dominant steps"),
         ("Non-Cache", f"{metrics.get('non_cache_ratio', 0)}%",
          f"{metrics.get('non_cache_tokens', 0):,} tokens"),
-        ("Cost", f"${metrics.get('total_cost', 0):.4f}",
-         f"{metrics.get('reasoning_parts', 0)} reasoning parts"),
     ]
     card_html = []
     for label, value, sub in cards:
@@ -194,6 +156,7 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             # ===== Overview & Charts Tab (merged) =====
             with gr.TabItem("Overview"):
                 overview_kpi_html = gr.HTML("", elem_classes=["overview-kpi-strip"])
+                health_verdict_html = gr.HTML("")
 
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=1, min_width=320):
@@ -212,32 +175,54 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                     with gr.Column(scale=1, min_width=320):
                         output_md = gr.Markdown("", elem_classes=["overview-card"])
 
-                with gr.Row():
-                    chart_toggle = gr.Radio(
-                        choices=["Per-Step", "Cumulative"],
-                        value="Per-Step",
-                        label="Token chart mode",
-                        scale=1,
-                        elem_classes=["chart-control"],
-                    )
-                with gr.Row(equal_height=True):
-                    token_chart = gr.Plot(label="Token Usage")
-                    duration_chart = gr.Plot(label="Step Duration")
-                with gr.Row(equal_height=True):
-                    context_growth_chart = gr.Plot(label="Context Growth")
-                    cost_chart = gr.Plot(label="Cost per Step")
-                with gr.Row(equal_height=False):
-                    with gr.Column(scale=2, min_width=560):
-                        efficiency_chart = gr.Plot(label="Per-Step Efficiency")
-                    with gr.Column(scale=1, min_width=340):
-                        tool_chart = gr.Plot(label="Tool Call Frequency")
-                        cache_chart = gr.Plot(label="Cache Ratio")
+                with gr.Accordion("Performance — Token consumption and step latency patterns",
+                                 open=True, elem_classes=["per-message-acc"]):
+                    perf_insights_html = gr.HTML("")
+                    with gr.Row():
+                        chart_toggle = gr.Radio(
+                            choices=["Per-Step", "Cumulative"],
+                            value="Per-Step",
+                            label="Token chart mode",
+                            scale=1,
+                            elem_classes=["chart-control"],
+                        )
+                    with gr.Row(equal_height=True):
+                        token_chart = gr.Plot(label="Token Usage")
+                        duration_chart = gr.Plot(label="Step Duration")
+
+                with gr.Accordion("Efficiency — Context growth and cache behavior",
+                                 open=False, elem_classes=["per-message-acc"]):
+                    eff_insights_html = gr.HTML("")
+                    with gr.Row(equal_height=True):
+                        context_growth_chart = gr.Plot(label="Context Growth")
+
+                with gr.Accordion("Tools & Cache — Tool usage distribution, throughput, and cache behavior",
+                                 open=False, elem_classes=["per-message-acc"]):
+                    tools_insights_html = gr.HTML("")
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=2, min_width=560):
+                            efficiency_chart = gr.Plot(label="Per-Step Efficiency")
+                        with gr.Column(scale=1, min_width=340):
+                            tool_chart = gr.Plot(label="Tool Call Frequency")
+                            cache_chart = gr.Plot(label="Cache Ratio")
 
                 with gr.Accordion("Per-Message Deep Dive", open=False, elem_classes=["per-message-acc"]):
                     per_message_md = gr.Markdown("", elem_classes=["overview-card"])
 
             # ===== Workflow Tab =====
             with gr.TabItem("Workflow"):
+                with gr.Row(equal_height=True):
+                    wf_filter_checks = gr.CheckboxGroup(
+                        choices=["Assistant", "User", "Tool Calls", "Errors", "Reasoning"],
+                        value=["Assistant", "User", "Tool Calls", "Errors", "Reasoning"],
+                        label="Show steps",
+                        scale=3,
+                    )
+                    wf_search = gr.Textbox(
+                        label="Search", placeholder="Filter by keyword...",
+                        scale=1,
+                    )
+                wf_count_html = gr.HTML("")
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=3, min_width=400):
                         workflow_html = gr.HTML(
@@ -289,6 +274,23 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
 
         # -- Callbacks --
 
+        _empty_fig = go.Figure()
+        _empty_fig.update_layout(template="plotly_white", height=380)
+
+        def _empty_result(banner="", detail="*No data*"):
+            """Return the 28-element tuple of empty outputs for error states."""
+            f = _empty_fig
+            return (
+                [], banner, "", "",
+                detail, "", "", "", "",
+                "", "", "",
+                f, f, f, f, f, f,
+                "", "", "<div></div>",
+                "*Click a step card to inspect details.*", "",
+                detail, "", f, f, f, f,
+                pd.DataFrame(),
+            )
+
         def do_load(dropdown_val, upload_obj):
             """Load trajectory from dropdown or upload."""
             file_path = None
@@ -297,281 +299,82 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             elif dropdown_val:
                 file_path = os.path.join(trajectory_dir, dropdown_val)
 
-            empty_fig = go.Figure()
-            empty_fig.update_layout(template="plotly_white", height=380)
-
             if not file_path or not os.path.isfile(file_path):
-                empty = "*No file selected or file not found.*"
-                return (
-                    [],
-                    "",
-                    "",
-                    empty, empty, empty, empty, empty,
-                    empty_fig, empty_fig, empty_fig, empty_fig,
-                    empty_fig, empty_fig, empty_fig,
-                    empty,
-                    "<div></div>",
-                    "*Click a step card to inspect details.*",
-                    "",
-                    empty, "", empty_fig, empty_fig,
-                    empty_fig, empty_fig,
-                    pd.DataFrame(),
-                )
+                return _empty_result(detail="*No file selected or file not found.*")
 
             raw = load_trajectory(file_path)
             if "_error" in raw:
-                return (
-                    [],
-                    f"<p style='color:#dc2626;'>Error: {html.escape(raw['_error'])}</p>",
-                    "",
-                    "*Error loading file.*", "", "", "", "",
-                    empty_fig, empty_fig, empty_fig, empty_fig,
-                    empty_fig, empty_fig, empty_fig,
-                    "",
-                    "<div></div>",
-                    "",
-                    "",
-                    "*Error*", "", empty_fig, empty_fig,
-                    empty_fig, empty_fig,
-                    pd.DataFrame(),
-                )
+                err_banner = f"<p style='color:#dc2626;'>Error: {html.escape(raw['_error'])}</p>"
+                return _empty_result(banner=err_banner, detail="*Error loading file.*")
 
             steps = parse_steps(raw)
             message_rows = build_message_metrics(steps)
             metrics = compute_metrics(steps, raw, message_rows=message_rows)
-            md = raw.get("metadata", {}) if isinstance(raw.get("metadata"), dict) else {}
-            timing = raw.get("timing", {}) if isinstance(raw.get("timing"), dict) else {}
-            outp = raw.get("output", {}) if isinstance(raw.get("output"), dict) else {}
-            session_raw = raw.get("session_raw", {}) if isinstance(raw.get("session_raw"), dict) else {}
-            retry = raw.get("retry", {}) if isinstance(raw.get("retry"), dict) else {}
+            _d = lambda k: raw.get(k, {}) if isinstance(raw.get(k), dict) else {}
+            md, timing, outp = _d("metadata"), _d("timing"), _d("output")
+            session_raw, retry = _d("session_raw"), _d("retry")
 
-            # Extract model/provider/agent from first assistant step
-            model_id = ""
-            provider_id = ""
-            agent_id = ""
-            for s in steps:
-                if s["role"] == "assistant" and s.get("model_id"):
-                    model_id = s["model_id"]
-                    provider_id = s.get("provider_id", "")
-                    if not agent_id and s.get("agent"):
-                        agent_id = s["agent"]
-                    break
-            if not agent_id:
-                for s in steps:
-                    if s.get("agent"):
-                        agent_id = s["agent"]
-                        break
+            model_id, provider_id, agent_id = extract_agent_info(steps)
+            _, wfmt = wall_clock_fmt(metrics)
+            banner = format_banner_html(os.path.basename(file_path), metrics, wfmt)
+            kpi_html = _build_overview_kpi_html(metrics, wfmt)
 
-            # -- Summary banner --
-            fname = os.path.basename(file_path)
-            wall = metrics["wall_clock"] if isinstance(metrics["wall_clock"], (int, float)) else metrics["total_duration"]
-            wall_fmt = f"{wall:.0f}s" if wall < 3600 else f"{wall / 60:.1f}m"
-            banner = (
-                f"<strong>{html.escape(fname)}</strong> &nbsp;&mdash;&nbsp; "
-                f"{metrics['total_steps']} steps &middot; "
-                f"{metrics['tool_call_count']} tool calls ({metrics['tool_success_rate']}% success) &middot; "
-                f"{metrics['tokens']['total']:,} tokens &middot; "
-                f"{wall_fmt} wall-clock &middot; "
-                f"{metrics['tokens_per_second']} tok/s &middot; "
-                f"{metrics['reasoning_parts']} reasoning &middot; "
-                f"${metrics['total_cost']:.4f}"
+            # -- Overview markdown sections --
+            meta_text = format_session_md(
+                timing, md, retry,
+                model_id=model_id, provider_id=provider_id, agent_id=agent_id,
             )
-            kpi_html = _build_overview_kpi_html(metrics, wall_fmt)
-
-            # -- Overview: Session & Environment --
-            started = timing.get("started_at", "N/A")
-            finished = timing.get("finished_at", "N/A")
-            # Format timestamps nicely (strip timezone suffix for readability)
-            if isinstance(started, str) and len(started) > 19:
-                started_short = started[:19].replace("T", " ")
-            else:
-                started_short = str(started)
-            if isinstance(finished, str) and len(finished) > 19:
-                finished_short = finished[:19].replace("T", " ")
-            else:
-                finished_short = str(finished)
-
-            summary_info = session_raw.get("summary", {})
-            retry_info = ""
-            if retry:
-                retry_info = f"| Attempts | {retry.get('total_attempts', '?')} / {retry.get('max_retries', '?')} |"
-
-            meta_text = f"""### Session & Environment
-| Field | Value |
-|-------|-------|
-| Model | `{model_id or md.get('model') or 'N/A'}` |
-| Provider | `{provider_id or 'N/A'}` |
-| Agent | `{agent_id or md.get('agent', 'N/A')}` |
-| Start time | `{started_short}` |
-| End time | `{finished_short}` |
-| Duration | `{timing.get('total_duration', 'N/A')}s` |
-| Session | `{md.get('session_id', 'N/A')}` |
-| Branch | `{md.get('branch', 'N/A')}` |
-| Baseline commit | `{(md.get('baseline_commit') or 'N/A')[:12]}` |
-| Directory | `{md.get('directory_name', 'N/A')}` |
-| Server version | `{md.get('server_version', 'N/A')}` |
-| Hostname | `{md.get('hostname', 'N/A')}` |
-| Platform | `{(md.get('platform') or 'N/A')[:50]}` |
-| Python | `{md.get('python_version', 'N/A')}` |
-{retry_info}
-"""
-
-            # -- Overview: Performance & Tokens --
-            # Format finish breakdown string
-            finish_parts = []
-            for fk, fv in sorted(metrics["finish_breakdown"].items(), key=lambda x: -x[1]):
-                finish_parts.append(f"{fv} {fk}")
-            finish_str = ", ".join(finish_parts) if finish_parts else "N/A"
-
-            # Format tool status breakdown string
-            tool_status_parts = []
-            for sk, sv in sorted(metrics["tool_status_breakdown"].items(), key=lambda x: -x[1]):
-                tool_status_parts.append(f"{sv} {sk}")
-            tool_status_str = ", ".join(tool_status_parts) if tool_status_parts else "N/A"
-
-            # Format role breakdown string
-            role_parts = []
-            for rk, rv in sorted(metrics["messages_breakdown"].items()):
-                role_parts.append(f"{rv} {rk}")
-            role_str = ", ".join(role_parts) if role_parts else "N/A"
-
-            metrics_text = f"""### Performance & Tokens
-| Metric | Value |
-|--------|------:|
-| Total steps | {metrics['total_steps']} |
-| Wall-clock time | {wall_fmt} |
-| Avg step duration | {metrics['avg_duration']}s |
-| Median / P95 duration | {metrics['median_duration']}s / {metrics['p95_duration']}s |
-| Max step duration | {metrics['max_duration']}s |
-| Total tokens | {metrics['tokens']['total']:,} |
-| \u2003Input | {metrics['tokens']['input']:,} |
-| \u2003Output | {metrics['tokens']['output']:,} |
-| \u2003Reasoning | {metrics['tokens']['reasoning']:,} |
-| \u2003Cache read | {metrics['tokens']['cache_read']:,} |
-| \u2003Cache write | {metrics['tokens']['cache_write']:,} |
-| Non-cache tokens | {metrics['non_cache_tokens']:,} ({metrics['non_cache_ratio']}%) |
-| Avg tokens / step | {metrics['avg_tokens_per_step']:,} |
-| Tokens / second | {metrics['tokens_per_second']:,} |
-| Median tokens / second | {metrics['median_tokens_per_second']:,} |
-| Output/Input token ratio | {metrics['output_input_ratio']} |
-| Total cost | ${metrics['total_cost']:.4f} |
-| Tokens / tool call | {metrics['tokens_per_tool']:,} |
-
-**Tool calls** ({metrics['tool_call_count']} total, {metrics['tool_success_rate']}% success)
-
-{_fmt_dict_as_table(metrics['tool_breakdown'], 'Tool', 'Count')}
-{"" if not metrics.get('agent_breakdown') else chr(10) + "**Agent breakdown**" + chr(10) + chr(10) + _fmt_dict_as_table(metrics['agent_breakdown'], 'Agent', 'Steps') + chr(10)}{"" if not metrics.get('model_breakdown') else chr(10) + "**Model breakdown**" + chr(10) + chr(10) + _fmt_dict_as_table(metrics['model_breakdown'], 'Model', 'Steps') + chr(10)}"""
-
-            behavior_text = f"""### Behavioral Diagnostics
-| Indicator | Value |
-|-----------|------:|
-| Assistant steps | {metrics['assistant_steps']} |
-| Multi-tool assistant steps | {metrics['multi_tool_steps']} |
-| No-tool assistant steps | {metrics['no_tool_assistant_steps']} |
-| Median assistant step tokens | {metrics['median_step_tokens']:,} |
-| P95 assistant step tokens | {metrics['p95_step_tokens']:,} |
-| Avg cache-read ratio | {metrics['avg_cache_ratio']}% |
-| Cache-dominant assistant steps (\u226590%) | {metrics['cache_dominant_steps']} |
-| Tool execution time (sum) | {metrics['tool_time_total']}s |
-| Tool-wait share of step time | {metrics['tool_wait_share']}% |
-| Avg / P95 / Max tool duration | {metrics['avg_tool_duration']}s / {metrics['p95_tool_duration']}s / {metrics['max_tool_duration']}s |
-"""
-
+            metrics_text = format_performance_md(metrics, wfmt)
+            behavior_text = format_behavioral_md(metrics)
             hotspots_text = _build_hotspots_md(message_rows)
             per_message_text = _build_per_message_md(message_rows)
-
-            # -- Overview: Output & Results --
-            output_rows: list[str] = []
-            if outp.get("has_patch"):
-                output_rows.append(f"| Patch | {outp.get('patch_lines', 0)} lines, {outp.get('patch_length', 0):,} chars |")
-            if summary_info:
-                output_rows.append(f"| Files changed | {summary_info.get('files', 'N/A')} |")
-                output_rows.append(f"| Additions | +{summary_info.get('additions', 0)} |")
-                output_rows.append(f"| Deletions | -{summary_info.get('deletions', 0)} |")
-            gt_patch = md.get("ground_truth_patch", "")
-            if gt_patch:
-                output_rows.append(f"| Ground truth | `{gt_patch[:60]}{'...' if len(gt_patch) > 60 else ''}` |")
-            if outp.get("error"):
-                output_rows.append(f"| Error | `{outp['error']}` |")
-
-            output_table = ""
-            if output_rows:
-                output_table = "| Field | Value |\n|-------|-------|\n" + "\n".join(output_rows)
-
-            outp_text = f"""### Output & Agent Stats
-{output_table}
-
-| Indicator | Value |
-|-----------|-------|
-| Role breakdown | {role_str} |
-| Assistant finish states | {finish_str} |
-| Tool calls | {metrics['tool_call_count']} |
-| Tool status | {tool_status_str} |
-| Tool success rate | {metrics['tool_success_rate']}% |
-| Reasoning parts | {metrics['reasoning_parts']} |
-| Text parts | {metrics['text_parts']} |
-"""
+            summary_info = session_raw.get("summary", {})
+            outp_text = format_output_md(outp, md, summary_info, metrics)
 
             # -- Workflow tab --
             wf_html = render_workflow_html(steps)
+            wf_count = f"<div class='wf-count'>Showing {len(steps)} of {len(steps)} steps</div>"
 
-            # -- Charts --
-            tok_fig = build_token_chart(steps, cumulative=False)
-            dur_fig = build_duration_chart(steps)
-            tl_fig = build_tool_chart(steps)
-            cache_fig = build_cache_ratio_chart(message_rows)
-            eff_fig = build_efficiency_chart(message_rows)
-            ctx_fig = build_context_growth_chart(message_rows)
-            cost_fig = build_cost_chart(message_rows)
-
-            # -- Analytics tab --
+            # -- Analytics (computed before charts so annotations can use phases) --
             step_analytics = compute_step_analytics(steps)
             phases = detect_phases(step_analytics)
+
+            # -- Charts --
+            tok_fig = build_token_chart(steps, cumulative=False,
+                                        step_analytics=step_analytics, phases=phases)
+            dur_fig = build_duration_chart(steps, step_analytics=step_analytics, phases=phases)
+            tl_fig = build_tool_chart(steps)
+            cache_fig = build_cache_ratio_chart(message_rows,
+                                                step_analytics=step_analytics, phases=phases)
+            eff_fig = build_efficiency_chart(message_rows,
+                                            step_analytics=step_analytics, phases=phases)
+            ctx_fig = build_context_growth_chart(message_rows,
+                                                step_analytics=step_analytics, phases=phases)
             insights_list = generate_insights(step_analytics, phases, steps=steps)
             tool_dur_fig = build_tool_duration_chart(steps)
             idle_fig = build_idle_gap_chart(step_analytics)
 
-            phase_lines = []
-            for p in phases:
-                phase_lines.append(
-                    f"**{p['name']}** (idx {p['start_idx']}\u2013{p['end_idx']}): "
-                    f"{p['token_share']}% tokens, {p['runtime_share']}% time")
-            phase_md = "### Phase Summary\n\n" + "\n\n".join(phase_lines)
-
+            phase_md = "### Phase Summary\n\n" + "\n\n".join(
+                f"**{p['name']}** (idx {p['start_idx']}\u2013{p['end_idx']}): "
+                f"{p['token_share']}% tokens, {p['runtime_share']}% time"
+                for p in phases)
             insights_md = "### Behavioral Insights\n\n" + "\n".join(
                 f"- {ins}" for ins in insights_list)
 
             heatmap_fig = build_analytics_heatmap(step_analytics, phases)
             phase_fig = build_phase_chart(phases, step_analytics)
 
-            has_agents = any(a.get("agent") for a in step_analytics)
-            df_rows = []
-            for a in step_analytics:
-                row = {
-                    "idx": a["index"],
-                    "role": a["role"],
-                }
-                if has_agents:
-                    row["agent"] = a.get("agent", "")
-                row.update({
-                    "dur(s)": a["duration_s"],
-                    "tok_total": a["tok_total"],
-                    "tok/s": (round(a["tok_per_s"])
-                              if a["tok_per_s"] is not None else None),
-                    "cache%": round(a["cache_ratio"] * 100, 1),
-                    "non_cache": a["non_cache_tok"],
-                    "out/in": (round(a["out_in_ratio"], 3)
-                               if a["out_in_ratio"] is not None else None),
-                    "tool#": a["tool_calls"],
-                    "tool_share%": (round(a["tool_time_share"] * 100, 1)
-                                    if a["tool_time_share"] is not None
-                                    else None),
-                    "finish": a["finish"],
-                    "parts": a["part_mix"],
-                    "idle(s)": a["idle_before_s"],
-                })
-                df_rows.append(row)
-            analytics_df = pd.DataFrame(df_rows)
+            analytics_df = pd.DataFrame(build_analytics_dataframe(step_analytics))
+
+            # -- Health verdict --
+            verdicts = compute_health_verdict(metrics, step_analytics)
+            verdict_html = _build_health_verdict_html(verdicts)
+
+            # -- Section insight callouts --
+            section_insights = _map_insights_to_sections(insights_list)
+            perf_callout = _build_insight_callout_html(section_insights["performance"])
+            eff_callout = _build_insight_callout_html(section_insights["efficiency"])
+            tools_callout = _build_insight_callout_html(section_insights["tools"])
 
             # -- Raw data --
             raw_str = json.dumps(raw, indent=2, ensure_ascii=False, default=str)
@@ -582,9 +385,12 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                 steps,
                 banner,
                 kpi_html,
+                verdict_html,
                 meta_text, metrics_text, outp_text, behavior_text, hotspots_text,
-                tok_fig, dur_fig, ctx_fig, cost_fig, tl_fig, cache_fig, eff_fig,
+                perf_callout, eff_callout, tools_callout,
+                tok_fig, dur_fig, ctx_fig, tl_fig, cache_fig, eff_fig,
                 per_message_text,
+                wf_count,
                 wf_html,
                 "*Click a step card to inspect details.*",
                 raw_str,
@@ -597,10 +403,13 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             state_steps,
             summary_banner,
             overview_kpi_html,
+            health_verdict_html,
             meta_md, metrics_md, output_md, behavior_md, hotspots_md,
-            token_chart, duration_chart, context_growth_chart, cost_chart,
+            perf_insights_html, eff_insights_html, tools_insights_html,
+            token_chart, duration_chart, context_growth_chart,
             tool_chart, cache_chart, efficiency_chart,
             per_message_md,
+            wf_count_html,
             workflow_html,
             detail_md,
             raw_json,
@@ -643,12 +452,95 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
 
         # -- Chart toggle callback --
         def on_chart_toggle(mode, steps):
-            return build_token_chart(steps or [], cumulative=(mode == "Cumulative"))
+            sa = compute_step_analytics(steps or [])
+            ph = detect_phases(sa) if sa else []
+            return build_token_chart(steps or [], cumulative=(mode == "Cumulative"),
+                                     step_analytics=sa, phases=ph)
 
         chart_toggle.change(
             fn=on_chart_toggle,
             inputs=[chart_toggle, state_steps],
             outputs=[token_chart],
+        )
+
+        # -- Workflow filter callback --
+        def _filter_workflow_steps(steps, active_filters, keyword):
+            """Return indices of steps matching filters and keyword."""
+            if not steps:
+                return []
+            keyword = (keyword or "").strip().lower()
+            active = set(active_filters)
+            # Separate role filters (gate) from content filters (narrow)
+            role_filters = active & {"Assistant", "User"}
+            content_filters = active & {"Tool Calls", "Errors", "Reasoning"}
+            filtered = []
+            for i, s in enumerate(steps):
+                role = s["role"]
+                # Role gate: step must match a checked role
+                role_ok = (
+                    ("Assistant" in role_filters and role == "assistant")
+                    or ("User" in role_filters and role == "user")
+                )
+                if not role_ok:
+                    continue
+                # Content gate: only applies to steps that have filterable content
+                if content_filters:
+                    has_content = (s["tool_call_count"] > 0
+                                   or s["error_count"] > 0
+                                   or s["has_reasoning"])
+                    if has_content:
+                        content_ok = (
+                            ("Tool Calls" in content_filters and s["tool_call_count"] > 0)
+                            or ("Errors" in content_filters and s["error_count"] > 0)
+                            or ("Reasoning" in content_filters and s["has_reasoning"])
+                        )
+                        if not content_ok:
+                            continue
+                # Keyword match
+                if keyword:
+                    text = (s.get("text_preview") or "").lower()
+                    tool_names = " ".join(tc["tool_name"] for tc in s.get("tool_calls", [])).lower()
+                    tool_args = " ".join(
+                        str(tc.get("input", "")) for tc in s.get("tool_calls", [])
+                    ).lower()
+                    if keyword not in text and keyword not in tool_names and keyword not in tool_args:
+                        continue
+                filtered.append(i)
+            return filtered
+
+        def do_filter_workflow(steps, active_filters, keyword):
+            """Re-render workflow HTML with filters applied."""
+            if not steps:
+                return (
+                    "<div style='padding:3em;color:#9ca3af;text-align:center;"
+                    "font-size:15px;'>Load a trajectory to see the step flow.</div>",
+                    "",
+                )
+            if not active_filters:
+                return (
+                    "<div style='padding:2em;color:#9ca3af;text-align:center;'>"
+                    "No filters selected &mdash; check at least one filter to see steps.</div>",
+                    "<div class='wf-count'>Showing 0 of "
+                    f"{len(steps)} steps</div>",
+                )
+            indices = _filter_workflow_steps(steps, active_filters, keyword)
+            filtered_steps = [steps[i] for i in indices]
+            wf_html = render_workflow_html(filtered_steps)
+            count_html = (
+                f"<div class='wf-count'>Showing {len(filtered_steps)} of "
+                f"{len(steps)} steps</div>"
+            )
+            return wf_html, count_html
+
+        wf_filter_checks.change(
+            fn=do_filter_workflow,
+            inputs=[state_steps, wf_filter_checks, wf_search],
+            outputs=[workflow_html, wf_count_html],
+        )
+        wf_search.change(
+            fn=do_filter_workflow,
+            inputs=[state_steps, wf_filter_checks, wf_search],
+            outputs=[workflow_html, wf_count_html],
         )
 
     return app

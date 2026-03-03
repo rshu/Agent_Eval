@@ -1,5 +1,7 @@
 """Per-step analytics, phase detection, and behavioral insights."""
 
+from .data import infer_non_cache_input
+
 
 def compute_step_analytics(steps: list[dict]) -> list[dict]:
     """Compute derived per-message metrics aligned 1:1 with steps."""
@@ -29,7 +31,14 @@ def compute_step_analytics(steps: list[dict]) -> list[dict]:
         cache_ratio = round(cache_read / tok_total, 4) if tok_total > 0 else 0.0
         input_tok = step["tokens"]["input"]
         output_tok = step["tokens"]["output"]
-        non_cache_tok = max(0, input_tok - cache_read)
+        reasoning_tok = step["tokens"]["reasoning"]
+        non_cache_tok = infer_non_cache_input(
+            total_tokens=tok_total,
+            input_tokens=input_tok,
+            output_tokens=output_tok,
+            reasoning_tokens=reasoning_tok,
+            cache_read_tokens=cache_read,
+        )
         out_in_ratio = round(output_tok / input_tok, 4) if input_tok > 0 else None
 
         # Sorted unique part types
