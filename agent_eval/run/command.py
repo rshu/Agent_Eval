@@ -103,9 +103,20 @@ def handler(args):
         # Derive repo URL from gt_patch URL for branch fetching when no remote exists
         gt_patch_repo_url = None
         if gt_patch_original and is_url(gt_patch_original):
-            m = re.match(r"(https?://[^/]+/[^/]+/[^/]+)", gt_patch_original)
-            if m:
-                gt_patch_repo_url = m.group(1) + ".git"
+            # patch-diff.githubusercontent.com uses /raw/{owner}/{repo}/...
+            pd_match = re.match(
+                r"https?://patch-diff\.githubusercontent\.com/raw/([^/]+)/([^/]+)",
+                gt_patch_original,
+            )
+            if pd_match:
+                gt_patch_repo_url = (
+                    f"https://github.com/{pd_match.group(1)}/{pd_match.group(2)}.git"
+                )
+            else:
+                # Standard URL (gitee, gitlab, etc.): host/owner/repo
+                m = re.match(r"(https?://[^/]+/[^/]+/[^/]+)", gt_patch_original)
+                if m:
+                    gt_patch_repo_url = m.group(1) + ".git"
 
         # ── 1) Health check ──
 

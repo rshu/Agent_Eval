@@ -24,9 +24,18 @@ def _parse_part(part) -> dict:
         }
 
     if ptype == "tool":
+        # Resolve tool name: name → toolName → tool_name → state.title → unknown
+        tool_name = part.get("name") or part.get("toolName") or part.get("tool_name")
+        if not tool_name:
+            state = part.get("state")
+            title = state.get("title", "") if isinstance(state, dict) else ""
+            if title:
+                tool_name = title.split()[0] if " " in title else title[:30]
+            else:
+                tool_name = "unknown"
         return {
             "type": "tool_call",
-            "tool_name": part.get("name", part.get("toolName", "?")),
+            "tool_name": tool_name,
             "tool_id": part.get("id", part.get("toolCallId", "")),
             "state": part.get("state", "?"),            # pending/running/completed/error
             "input": part.get("input", part.get("args", {})),
@@ -154,11 +163,23 @@ def collect_trajectory(session_id: str, directory: str, prompt: str,
     total_tokens = 0
     prompt_tokens = 0
     completion_tokens = 0
+    cache_read_tokens = 0
+    cache_write_tokens = 0
     for m in messages:
         info = m.get("info") if isinstance(m.get("info"), dict) else {}
-        total_tokens += info.get("totalTokens", info.get("total_tokens", 0))
-        prompt_tokens += info.get("promptTokens", info.get("prompt_tokens", 0))
-        completion_tokens += info.get("completionTokens", info.get("completion_tokens", 0))
+        tokens = info.get("tokens") if isinstance(info.get("tokens"), dict) else None
+        if tokens:
+            total_tokens += tokens.get("total", 0) or 0
+            prompt_tokens += tokens.get("input", 0) or 0
+            completion_tokens += tokens.get("output", 0) or 0
+            cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+            cache_read_tokens += cache.get("read", 0) or 0
+            cache_write_tokens += cache.get("write", 0) or 0
+        else:
+            # Fallback to legacy flat fields
+            total_tokens += info.get("totalTokens", info.get("total_tokens", 0)) or 0
+            prompt_tokens += info.get("promptTokens", info.get("prompt_tokens", 0)) or 0
+            completion_tokens += info.get("completionTokens", info.get("completion_tokens", 0)) or 0
 
     return {
         # ── Session metadata ──
@@ -209,6 +230,8 @@ def collect_trajectory(session_id: str, directory: str, prompt: str,
             "total_tokens": total_tokens,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
         },
 
         # ── Agent behavior stats ──
@@ -218,7 +241,11 @@ def collect_trajectory(session_id: str, directory: str, prompt: str,
             "assistant_messages": sum(1 for m in messages if m["role"] == "assistant"),
             "total_tool_calls": len(tool_calls),
             "tool_call_breakdown": tool_summary,
-            "failed_tool_calls": sum(1 for tc in tool_calls if tc["state"] == "error"),
+            "failed_tool_calls": sum(
+                1 for tc in tool_calls
+                if (tc["state"].get("status") if isinstance(tc["state"], dict) else tc["state"])
+                in {"error", "failed", "failure", "cancelled", "canceled", "timeout", "timed_out"}
+            ),
             "reasoning_steps": len(reasoning_steps),
         },
 

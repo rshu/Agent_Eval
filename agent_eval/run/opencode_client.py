@@ -192,7 +192,7 @@ def send_task(session_id: str, prompt: str, directory: str,
         msg = opencode_request("POST", f"/session/{session_id}/message",
                                json_body=body,
                                params={"directory": directory},
-                               timeout=600)
+                               timeout=7200)
 
         # If POST returned no body, poll for the assistant reply
         if msg is None or (isinstance(msg, str) and not msg.strip()):

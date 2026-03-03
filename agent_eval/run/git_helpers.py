@@ -19,15 +19,20 @@ _SANITIZE_SIDECAR = ".agent_eval_sanitize_meta.json"
 
 
 def git_run(args: list[str], directory: str, timeout: int = 60,
-            check: bool = True) -> subprocess.CompletedProcess:
+            check: bool = True,
+            show_progress: bool = False) -> subprocess.CompletedProcess:
     """Run a git command, optionally raising on failure."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     result = subprocess.run(
         ["git"] + args,
-        cwd=directory, capture_output=True, text=True, timeout=timeout,
+        cwd=directory,
+        stdout=subprocess.PIPE,
+        stderr=None if show_progress else subprocess.PIPE,
+        text=True, timeout=timeout, env=env,
     )
     if check and result.returncode != 0:
         cmd_str = " ".join(["git"] + args)
-        raise RuntimeError(f"git command failed: {cmd_str}\n{result.stderr.strip()}")
+        raise RuntimeError(f"git command failed: {cmd_str}\n{result.stderr.strip() if result.stderr else ''}")
     return result
 
 
@@ -503,6 +508,11 @@ def setup_starting_point(directory: str, branch: str | None = None,
     if branch:
         current_branch = ref_result.stdout.strip()
         if current_branch != branch:
+            # Clean the working tree before switching branches so leftover
+            # changes from a previous run don't block the checkout.
+            _mark_mutated()
+            git_run(["reset", "--hard", "HEAD"], directory)
+            git_run(["clean", "-fd"], directory)
             result = git_run(["checkout", branch], directory, check=False)
             if result.returncode != 0:
                 # Branch not found locally — try fetching from remote
@@ -517,8 +527,10 @@ def setup_starting_point(directory: str, branch: str | None = None,
                     print(f"[..] Branch '{branch}' not found locally, "
                           f"fetching from {resolved_url}...")
                     fetch_result = git_run(
-                        ["fetch", resolved_url, f"{branch}:{branch}"],
-                        directory, check=False,
+                        ["fetch", "--depth", "1", "--no-tags",
+                         resolved_url, f"{branch}:{branch}"],
+                        directory, check=False, timeout=300,
+                        show_progress=True,
                     )
                     fetched = fetch_result.returncode == 0
 
@@ -529,9 +541,11 @@ def setup_starting_point(directory: str, branch: str | None = None,
                         pr_number = pr_match.group(1)
                         print(f"[..] Trying PR ref: pull/{pr_number}/head...")
                         fetch_result = git_run(
-                            ["fetch", resolved_url,
+                            ["fetch", "--depth", "1", "--no-tags",
+                             resolved_url,
                              f"pull/{pr_number}/head:{branch}"],
-                            directory, check=False,
+                            directory, check=False, timeout=300,
+                            show_progress=True,
                         )
                         fetched = fetch_result.returncode == 0
 
