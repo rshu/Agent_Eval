@@ -153,18 +153,10 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
 
         # -- Tabs --
         with gr.Tabs():
-            # ===== Overview & Charts Tab (merged) =====
+            # ===== Overview Tab (unified — includes former Analytics content) =====
             with gr.TabItem("Overview"):
                 overview_kpi_html = gr.HTML("", elem_classes=["overview-kpi-strip"])
                 health_verdict_html = gr.HTML("")
-
-                with gr.Row(equal_height=False):
-                    with gr.Column(scale=1, min_width=320):
-                        metrics_md = gr.Markdown("", elem_classes=["overview-card"])
-                    with gr.Column(scale=1, min_width=320):
-                        behavior_md = gr.Markdown("", elem_classes=["overview-card"])
-                    with gr.Column(scale=1, min_width=320):
-                        hotspots_md = gr.Markdown("", elem_classes=["overview-card"])
 
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=1, min_width=320):
@@ -175,8 +167,15 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                     with gr.Column(scale=1, min_width=320):
                         output_md = gr.Markdown("", elem_classes=["overview-card"])
 
-                with gr.Accordion("Performance — Token consumption and step latency patterns",
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=1, min_width=320):
+                        analytics_phase_md = gr.Markdown("", elem_classes=["overview-card"])
+                    with gr.Column(scale=1, min_width=320):
+                        analytics_insights_md = gr.Markdown("", elem_classes=["overview-card"])
+
+                with gr.Accordion("Performance — Token consumption, step latency, and phase timeline",
                                  open=True, elem_classes=["per-message-acc"]):
+                    metrics_md = gr.Markdown("", elem_classes=["overview-card"])
                     perf_insights_html = gr.HTML("")
                     with gr.Row():
                         chart_toggle = gr.Radio(
@@ -189,24 +188,38 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                     with gr.Row(equal_height=True):
                         token_chart = gr.Plot(label="Token Usage")
                         duration_chart = gr.Plot(label="Step Duration")
+                    with gr.Row(equal_height=True):
+                        analytics_phase_chart = gr.Plot(label="Phase Timeline")
 
-                with gr.Accordion("Efficiency — Context growth and cache behavior",
+                with gr.Accordion("Efficiency — Context growth, cache behavior, and behavioral heatmap",
                                  open=False, elem_classes=["per-message-acc"]):
                     eff_insights_html = gr.HTML("")
                     with gr.Row(equal_height=True):
                         context_growth_chart = gr.Plot(label="Context Growth")
+                        analytics_heatmap = gr.Plot(label="Behavioral Heatmap")
+                    with gr.Row(equal_height=True):
+                        cache_chart = gr.Plot(label="Cache Ratio")
 
-                with gr.Accordion("Tools & Cache — Tool usage distribution, throughput, and cache behavior",
+                with gr.Accordion("Tools — Tool usage, throughput, duration, and idle gaps",
                                  open=False, elem_classes=["per-message-acc"]):
+                    behavior_md = gr.Markdown("", elem_classes=["overview-card"])
                     tools_insights_html = gr.HTML("")
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=2, min_width=560):
                             efficiency_chart = gr.Plot(label="Per-Step Efficiency")
                         with gr.Column(scale=1, min_width=340):
                             tool_chart = gr.Plot(label="Tool Call Frequency")
-                            cache_chart = gr.Plot(label="Cache Ratio")
+                    with gr.Row(equal_height=True):
+                        tool_duration_chart = gr.Plot(label="Tool Duration by Type")
+                        idle_gap_chart = gr.Plot(label="Idle Gaps")
 
-                with gr.Accordion("Per-Message Deep Dive", open=False, elem_classes=["per-message-acc"]):
+                with gr.Accordion("Per-Step Deep Dive", open=False, elem_classes=["per-message-acc"]):
+                    hotspots_md = gr.Markdown("", elem_classes=["overview-card"])
+                    analytics_table = gr.Dataframe(
+                        label="Per-Step Metrics",
+                        interactive=False,
+                        wrap=True,
+                    )
                     per_message_md = gr.Markdown("", elem_classes=["overview-card"])
 
             # ===== Workflow Tab =====
@@ -229,39 +242,22 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                             "<div style='padding:3em;color:#9ca3af;text-align:center;"
                             "font-size:15px;'>Load a trajectory to see the step flow.</div>",
                             js_on_load="""
-                            element.querySelectorAll('.wf-card').forEach(function(card) {
-                                card.addEventListener('click', function() {
-                                    element.querySelectorAll('.wf-card').forEach(function(c) {
-                                        c.classList.remove('wf-active');
-                                    });
-                                    card.classList.add('wf-active');
-                                    var idx = parseInt(card.dataset.stepIdx);
-                                    if (!isNaN(idx)) {
-                                        trigger('click', {step_index: idx});
-                                    }
+                            element.addEventListener('click', function(e) {
+                                var card = e.target.closest('.wf-card');
+                                if (!card) return;
+                                element.querySelectorAll('.wf-card').forEach(function(c) {
+                                    c.classList.remove('wf-active');
                                 });
+                                card.classList.add('wf-active');
+                                var idx = parseInt(card.dataset.stepIdx);
+                                if (!isNaN(idx)) {
+                                    trigger('click', {step_index: idx});
+                                }
                             });
                             """,
                         )
                     with gr.Column(scale=2, min_width=300, elem_classes=["detail-panel"]):
                         detail_md = gr.Markdown("*Click a step card to inspect details.*")
-
-            # ===== Analytics Tab =====
-            with gr.TabItem("Analytics"):
-                analytics_phase_md = gr.Markdown(
-                    "*Load a trajectory to see analytics.*")
-                analytics_insights_md = gr.Markdown("")
-                with gr.Row(equal_height=True):
-                    analytics_heatmap = gr.Plot(label="Behavioral Heatmap")
-                    analytics_phase_chart = gr.Plot(label="Phase Timeline")
-                with gr.Row(equal_height=True):
-                    tool_duration_chart = gr.Plot(label="Tool Duration by Type")
-                    idle_gap_chart = gr.Plot(label="Idle Gaps")
-                analytics_table = gr.Dataframe(
-                    label="Per-Step Metrics",
-                    interactive=False,
-                    wrap=True,
-                )
 
             # ===== Raw Data Tab =====
             with gr.TabItem("Raw Data"):
@@ -278,17 +274,35 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
         _empty_fig.update_layout(template="plotly_white", height=380)
 
         def _empty_result(banner="", detail="*No data*"):
-            """Return the 28-element tuple of empty outputs for error states."""
+            """Return the empty outputs tuple for error states."""
             f = _empty_fig
             return (
-                [], banner, "", "",
-                detail, "", "", "", "",
-                "", "", "",
-                f, f, f, f, f, f,
-                "", "", "<div></div>",
-                "*Click a step card to inspect details.*", "",
-                detail, "", f, f, f, f,
-                pd.DataFrame(),
+                [],              # state_steps
+                banner,          # summary_banner
+                "",              # overview_kpi_html
+                "",              # health_verdict_html
+                detail,          # meta_md
+                "",              # output_md
+                "",              # analytics_phase_md
+                "",              # analytics_insights_md
+                "",              # metrics_md
+                "",              # perf_insights_html
+                f, f,            # token_chart, duration_chart
+                f,               # analytics_phase_chart
+                "",              # eff_insights_html
+                f, f,            # context_growth_chart, analytics_heatmap
+                f,               # cache_chart
+                "",              # behavior_md
+                "",              # tools_insights_html
+                f, f,            # efficiency_chart, tool_chart
+                f, f,            # tool_duration_chart, idle_gap_chart
+                "",              # hotspots_md
+                pd.DataFrame(),  # analytics_table
+                "",              # per_message_md
+                "",              # wf_count_html
+                "<div></div>",   # workflow_html
+                "*Click a step card to inspect details.*",  # detail_md
+                "",              # raw_json
             )
 
         def do_load(dropdown_val, upload_obj):
@@ -382,41 +396,69 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                 raw_str = raw_str[:500_000] + "\n\n... (truncated at 500KB)"
 
             return (
-                steps,
-                banner,
-                kpi_html,
-                verdict_html,
-                meta_text, metrics_text, outp_text, behavior_text, hotspots_text,
-                perf_callout, eff_callout, tools_callout,
-                tok_fig, dur_fig, ctx_fig, tl_fig, cache_fig, eff_fig,
-                per_message_text,
-                wf_count,
-                wf_html,
-                "*Click a step card to inspect details.*",
-                raw_str,
-                phase_md, insights_md, heatmap_fig, phase_fig,
-                tool_dur_fig, idle_fig,
-                analytics_df,
+                steps,              # state_steps
+                banner,             # summary_banner
+                kpi_html,           # overview_kpi_html
+                verdict_html,       # health_verdict_html
+                meta_text,          # meta_md
+                outp_text,          # output_md
+                phase_md,           # analytics_phase_md
+                insights_md,        # analytics_insights_md
+                metrics_text,       # metrics_md
+                perf_callout,       # perf_insights_html
+                tok_fig,            # token_chart
+                dur_fig,            # duration_chart
+                phase_fig,          # analytics_phase_chart
+                eff_callout,        # eff_insights_html
+                ctx_fig,            # context_growth_chart
+                heatmap_fig,        # analytics_heatmap
+                cache_fig,          # cache_chart
+                behavior_text,      # behavior_md
+                tools_callout,      # tools_insights_html
+                eff_fig,            # efficiency_chart
+                tl_fig,             # tool_chart
+                tool_dur_fig,       # tool_duration_chart
+                idle_fig,           # idle_gap_chart
+                hotspots_text,      # hotspots_md
+                analytics_df,       # analytics_table
+                per_message_text,   # per_message_md
+                wf_count,           # wf_count_html
+                wf_html,            # workflow_html
+                "*Click a step card to inspect details.*",  # detail_md
+                raw_str,            # raw_json
             )
 
         all_outputs = [
-            state_steps,
-            summary_banner,
-            overview_kpi_html,
-            health_verdict_html,
-            meta_md, metrics_md, output_md, behavior_md, hotspots_md,
-            perf_insights_html, eff_insights_html, tools_insights_html,
-            token_chart, duration_chart, context_growth_chart,
-            tool_chart, cache_chart, efficiency_chart,
-            per_message_md,
-            wf_count_html,
-            workflow_html,
-            detail_md,
-            raw_json,
-            analytics_phase_md, analytics_insights_md, analytics_heatmap,
-            analytics_phase_chart,
-            tool_duration_chart, idle_gap_chart,
-            analytics_table,
+            state_steps,              # 0
+            summary_banner,           # 1
+            overview_kpi_html,        # 2
+            health_verdict_html,      # 3
+            meta_md,                  # 4
+            output_md,                # 5
+            analytics_phase_md,       # 6
+            analytics_insights_md,    # 7
+            metrics_md,               # 8
+            perf_insights_html,       # 9
+            token_chart,              # 10
+            duration_chart,           # 11
+            analytics_phase_chart,    # 12
+            eff_insights_html,        # 13
+            context_growth_chart,     # 14
+            analytics_heatmap,        # 15
+            cache_chart,              # 16
+            behavior_md,              # 17
+            tools_insights_html,      # 18
+            efficiency_chart,         # 19
+            tool_chart,               # 20
+            tool_duration_chart,      # 21
+            idle_gap_chart,           # 22
+            hotspots_md,              # 23
+            analytics_table,          # 24
+            per_message_md,           # 25
+            wf_count_html,            # 26
+            workflow_html,            # 27
+            detail_md,                # 28
+            raw_json,                 # 29
         ]
 
         load_btn.click(

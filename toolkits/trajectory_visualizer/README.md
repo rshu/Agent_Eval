@@ -1,8 +1,8 @@
 # Trajectory Visualizer
 
-Gradio-based UI to visualize agent execution trajectories, inspect individual steps, and compute key performance metrics.
+Gradio-based UI to visualize agent execution trajectories, inspect individual steps, and analyze performance across token usage, tool calls, caching, and behavioral patterns.
 
-## How to Run
+## Usage
 
 ```bash
 # From the project root
@@ -15,89 +15,321 @@ python -m toolkits.trajectory_visualizer [--port 7860] [--share] [--trajectory-d
 | `--share` | off | Create a public Gradio link |
 | `--trajectory-dir` | project root | Base directory for trajectory files |
 
-Trajectory files are discovered under `<trajectory-dir>/generated_patches/trajectory/**/*.json`.
-
-## Module Structure
+Once launched, open the UI in your browser at:
 
 ```
-trajectory_visualizer/
-  __init__.py      # Package marker (empty)
-  __main__.py      # CLI entry point
-  data.py          # Data loading, parsing, aggregate metrics, hotspots
-  analytics.py     # Per-step analytics, phase detection, behavioral insights
-  charts.py        # Plotly chart builders (11 chart types)
-  rendering.py     # HTML/code rendering, card styles, workflow HTML, step detail
-  app.py           # Gradio UI (build_ui, APP_CSS, callbacks)
-  README.md        # This file
+http://localhost:7860
 ```
+
+If you specified a custom port (e.g. `--port 8080`), use that port instead. With `--share`, Gradio will also print a temporary public URL (e.g. `https://xxxxx.gradio.live`).
+
+Trajectory files are discovered recursively under the given directory by scanning all `**/*.json` files that contain a top-level `"trajectory"` key.
+
+### Loading a Trajectory
+
+Use the dropdown to select a discovered file or upload a JSON file directly. The visualizer auto-loads when the dropdown selection changes.
 
 ## Tabs & Features
 
 ### Overview
 
-- **KPI strip** — Steps, wall-clock, tokens, tool success rate, cache ratio, non-cache ratio, cost.
-- **Session & Environment** — Model, provider, agent, timestamps, session ID, branch, commit, platform.
-- **Performance & Tokens** — Duration stats (avg/median/P95/max), full token breakdown (input/output/reasoning/cache read/cache write), non-cache tokens, cost, tokens per tool call, tool call frequency table, agent breakdown, model breakdown.
-- **Behavioral Diagnostics** — Multi-tool steps, no-tool steps, median/P95 step tokens, cache-dominant steps, tool execution time, tool-wait share, tool duration stats.
-- **Message Hotspots** — Top latency steps, top token-load steps, most expensive steps, lowest cache ratio steps.
-- **Per-Message Deep Dive** (accordion) — Full per-message diagnostics table with columns: step, role, agent, finish, duration, tokens, tok/s, cache %, non-cache, out/in ratio, tool calls, tool wait %, cost, parts.
+**KPI Strip** — Six cards at a glance:
 
-### Charts (Overview tab)
+| Card | Main Value | Sub-Value |
+|------|-----------|-----------|
+| Steps | Total step count | Assistant steps |
+| Wall-Clock | Total duration | P95 step duration |
+| Tokens | Total token count | Throughput (tok/s) |
+| Tool Success | Success rate % | Total call count |
+| Cache Ratio | Average cache hit % | Cache-dominant steps (>=90%) |
+| Non-Cache | Fresh input ratio % | Non-cache token count |
 
-| Chart | Description |
-|-------|-------------|
-| Token Usage | Stacked bar with non-overlapping segments: fresh input, cache read, output, reasoning. Per-step or cumulative toggle. |
-| Step Duration | Bar chart with average line, color-coded by step type. |
-| Context Growth | Cumulative input tokens, fresh input, and cache read lines — shows context window pressure. |
-| Cost per Step | Dual-axis: per-step cost bar + cumulative cost line. |
-| Per-Step Efficiency | Dual-axis: tokens/s and non-cache tok/s lines vs tool-wait % bar. |
-| Tool Call Frequency | Horizontal bar chart of call count by tool name. |
-| Cache-Read Ratio | Bar chart of cache ratio % per step with average line. |
+**Health Verdict** — Four traffic-light indicators:
+
+| Indicator | Good | Warning | Bad |
+|-----------|------|---------|-----|
+| Cache Efficiency | >= 60% avg cache ratio | 30-59% | < 30% |
+| Tool Success | >= 95% success rate | 80-94% | < 80% |
+| Throughput | >= 50 tok/s | 20-49 tok/s | < 20 tok/s |
+| Errors | 0 tool failures | 1-2 failures | >= 3 failures |
+
+**Session & Environment** — Model, provider, agent, start/end timestamps, duration, session ID, branch, baseline commit, directory, server version, hostname, platform, Python version, retry attempts.
+
+**Performance & Tokens** — Full metrics table:
+
+| Metric | Description |
+|--------|-------------|
+| Total steps | Number of trajectory messages |
+| Wall-clock time | End-to-end execution time |
+| Avg / Median / P95 / Max duration | Step duration distribution |
+| Token breakdown | Input, output, reasoning, cache read, cache write |
+| Non-cache tokens | Fresh input tokens (not from cache), with percentage |
+| Tokens / second | Overall and median throughput |
+| Output/Input ratio | How much output per input token |
+| Tokens / tool call | Average token cost per tool invocation |
+| Tool frequency table | Call count per tool name |
+| Agent / model breakdown | Steps per agent and model (if multi-agent) |
+
+**Behavioral Diagnostics** — Behavioral metrics table:
+
+| Metric | Description |
+|--------|-------------|
+| Multi-tool steps | Assistant steps with 2+ tool calls |
+| No-tool steps | Assistant steps with zero tool calls |
+| Median / P95 step tokens | Token distribution across assistant steps |
+| Cache-dominant steps | Steps where cache ratio >= 90% |
+| Tool execution time | Cumulative tool wait time |
+| Tool-wait share | Tool time as percentage of total execution |
+| Tool duration stats | Avg / P95 / Max per-call duration |
+
+**Output & Agent Stats** — Patch info (lines, size), files changed, additions/deletions, ground truth reference, role breakdown, finish states, tool status breakdown.
+
+**Message Hotspots** — Automatically ranked:
+- Top 5 slowest steps (by duration)
+- Top 5 highest-token steps
+- Top 5 lowest cache-ratio assistant steps (optimization targets)
+
+**Per-Message Deep Dive** — Expandable table with full per-step breakdown: step index, role, agent, finish, duration, tokens, tok/s, cache %, non-cache tokens, output/input ratio, tool calls, tool wait %, parts summary.
+
+### Charts
+
+| Chart | Type | Description |
+|-------|------|-------------|
+| Token Usage | Stacked bar | Non-overlapping segments: fresh input, cache read, output, reasoning. Toggle per-step / cumulative. |
+| Step Duration | Bar + avg line | Duration per step, color-coded by role/type. Outliers annotated. |
+| Context Growth | Multi-line | Cumulative input, fresh input, and cache read — shows context window pressure over time. |
+| Per-Step Efficiency | Dual-axis | Tokens/s and non-cache tok/s lines vs tool-wait % bar overlay. |
+| Tool Call Frequency | Horizontal bar | Call count per tool name, sorted ascending. |
+| Cache-Read Ratio | Bar + avg line | Cache hit % per step with average reference line. |
+
+All charts include:
+- **Phase overlays** — Semi-transparent vertical regions showing detected Boot / Steady / Closeout phases.
+- **Outlier annotations** — Spikes exceeding 2 standard deviations are labeled automatically.
 
 ### Workflow
 
-- **Step cards** — Vertical card flow with role badge (color per role: blue=user, amber=assistant), step type label, agent badge, duration, tokens, cost, tool count, error count, and text preview with syntax-highlighted code blocks.
-- **Detail panel** — Click any card to inspect full step metadata, token breakdown table, and content:
-  - Header table with conditional fields: role, agent, mode, model, provider, duration, created/completed timestamps, finish, cost, tool calls, errors, ID, parent ID, session, CWD, root, message ID.
-  - Token table: input, output, reasoning, cache read, cache write, total.
-  - Content sections: text, reasoning, tool calls (with input/output/error/metadata), patches (hash, files), snapshots.
-  - Tool call metadata: tool ID, session ID, model/provider, subagent type, truncated flag, plus generic scalar metadata.
+**Step Cards** — Scrollable vertical flow of step cards, each showing:
+- Role badge (blue = user, amber = assistant)
+- Step type label (Tool Calls, Reasoning, Text, Error, etc.)
+- Agent badge (if present)
+- Duration, token count, tool count, error count
+- Text preview with syntax-highlighted code blocks
+
+**Filters** — Five-category filter with two-layer logic:
+- *Role gate* (AND): **Assistant**, **User** — step must match at least one checked role
+- *Content gate* (OR within, AND with role): **Tool Calls**, **Errors**, **Reasoning** — narrows to steps containing selected content types
+- **Keyword search** — Filters by text preview, tool names, and tool arguments
+
+**Detail Panel** — Click any step card to inspect:
+- Metadata table (role, agent, model, provider, duration, timestamps, finish, IDs, CWD, etc.)
+- Token breakdown: input | output | reasoning | cache read | cache write | total
+- Content sections: text blocks, reasoning blocks, tool calls (with collapsible input/output/error), patches (hash + files)
+- Tool call metadata: tool ID, session, model/provider, subagent type, truncated flag
 
 ### Analytics
 
-- **Phase detection** — Automatic Boot / Steady / Closeout segmentation based on token and runtime share heuristics.
-- **Behavioral insights** — Auto-generated observations:
-  - Tool-heavy steps (tool time > 50% of step duration).
-  - Cache behavior (median and minimum cache ratio).
-  - Slow turns without tool waiting (likely long reasoning).
-  - High-token turns near end of trajectory.
-  - Context escalation (monotonically increasing token counts).
-  - Tool repetition detection (same tool + same target called 3+ times).
-- **Behavioral heatmap** — Normalized per-metric heatmap with 6 metrics: cache ratio, tool time share, tok/s, output/input ratio, fresh input tokens, idle gap.
-- **Phase timeline** — Stacked horizontal bar showing phase proportions.
-- **Tool Duration by Type** — Grouped bar chart of avg / P95 / max duration per tool.
-- **Idle Gaps** — Bar chart of inter-step gaps with average line.
-- **Per-Step Metrics table** — Sortable dataframe with idx, role, agent, duration, tokens, tok/s, cache %, non-cache, out/in, tool count, tool share %, finish, parts, idle gap.
+**Phase Detection** — Automatic segmentation into up to 3 phases:
+
+| Phase | Detection Rule | Meaning |
+|-------|---------------|---------|
+| Boot | Cumulative tokens < 15% but runtime > 30% | Initialization overhead |
+| Steady | Between Boot and Closeout | Main execution |
+| Closeout | Trailing stop/end_turn steps with above-average tokens | Final output generation |
+
+Each phase reports its share of total tokens and runtime.
+
+**Behavioral Insights** — Auto-generated observations:
+
+| Insight | Trigger | Section |
+|---------|---------|---------|
+| Tool-heavy steps | Tool time > 50% of step duration | Performance |
+| Cache behavior | Reports median and minimum cache ratio | Efficiency |
+| Slow turns | Duration > 30s with tool-wait < 30% | Performance |
+| High-token turns near end | Largest token steps in final 30% of trajectory | Performance |
+| Context escalation | 4+ consecutive non-decreasing token counts | Efficiency |
+| Tool repetition | Same tool + input called 3+ times | Tools |
+
+**Behavioral Heatmap** — Normalized (0-1) per-metric heatmap across all steps, with 6 metrics:
+- Cache Ratio, Tool Time Share, Tok/s, Output/Input Ratio, Fresh Input Tokens, Idle Gap
+
+**Phase Timeline** — Stacked horizontal bar showing proportional phase lengths.
+
+**Tool Duration by Type** — Grouped bar chart of avg / P95 / max duration per tool name.
+
+**Idle Gaps** — Bar chart of inter-step time gaps with average reference line.
+
+**Per-Step Metrics Table** — Sortable dataframe: idx, role, agent, duration, tokens, tok/s, cache %, non-cache, out/in ratio, tool count, tool share %, finish, parts, idle gap.
 
 ### Raw Data
 
-Full trajectory JSON viewer (truncated at 500 KB).
+Full trajectory JSON viewer (truncated at 500 KB for performance).
+
+## Metrics Reference
+
+### Aggregate Metrics
+
+Computed by `compute_metrics()` from all steps and raw trajectory data.
+
+#### Duration
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `total_steps` | int | Total number of trajectory messages |
+| `total_duration` | float | Sum of all step durations (seconds) |
+| `avg_duration` | float | Mean step duration |
+| `median_duration` | float | Median step duration |
+| `p95_duration` | float | 95th percentile step duration |
+| `max_duration` | float | Longest step duration |
+| `wall_clock` | float | Wall-clock time from timing metadata |
+
+#### Tokens
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `tokens.total` | int | Total tokens consumed |
+| `tokens.input` | int | Input tokens (includes cache read) |
+| `tokens.output` | int | Output tokens (includes reasoning) |
+| `tokens.reasoning` | int | Reasoning/thinking tokens |
+| `tokens.cache_read` | int | Tokens served from cache |
+| `tokens.cache_write` | int | Tokens written to cache |
+| `non_cache_tokens` | int | Fresh (non-cached) input tokens |
+| `non_cache_ratio` | float | % of input tokens that are fresh |
+| `avg_tokens_per_step` | int | Mean tokens per step |
+| `tokens_per_second` | int | Overall throughput |
+| `median_tokens_per_second` | int | Median per-step throughput |
+| `output_input_ratio` | float | Output / input token ratio |
+| `median_step_tokens` | int | Median tokens in assistant steps |
+| `p95_step_tokens` | int | P95 tokens in assistant steps |
+| `avg_cache_ratio` | float | Mean cache hit ratio (%) |
+| `cache_dominant_steps` | int | Steps with cache ratio >= 90% |
+| `cache_utilization_ratio` | float | cache_read / (cache_read + input) |
+| `tokens_per_patch_line` | float | Tokens per line of generated patch |
+| `tokens_per_churn_line` | float | Tokens per line of code change |
+
+#### Tools
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `tool_call_count` | int | Total tool invocations |
+| `tool_breakdown` | dict | `{tool_name: count}` |
+| `tool_status_breakdown` | dict | `{status: count}` (success, error, etc.) |
+| `tool_success` | int | Successful tool calls |
+| `tool_fail` | int | Failed tool calls |
+| `tool_success_rate` | float | Success percentage |
+| `tokens_per_tool` | int | Average tokens per tool call |
+| `tool_time_total` | float | Cumulative tool execution time (s) |
+| `tool_wait_share` | float | Tool time as % of total duration |
+| `avg_tool_duration` | float | Mean tool call duration (s) |
+| `p95_tool_duration` | float | P95 tool call duration (s) |
+| `max_tool_duration` | float | Longest tool call (s) |
+| `multi_tool_steps` | int | Steps with 2+ tool calls |
+| `no_tool_assistant_steps` | int | Assistant steps with 0 tool calls |
+| `tool_calls_per_min` | float | Tool call rate (per minute) |
+| `tool_time_fraction` | float | Tool time / total duration |
+| `command_success_rate` | float | Shell command success fraction |
+| `command_call_count` | int | Total command invocations |
+| `command_failures` | int | Commands with non-zero exit |
+
+#### Efficiency & Behavior
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `assistant_steps` | int | Count of assistant messages |
+| `messages_breakdown` | dict | `{role: count}` |
+| `agent_breakdown` | dict | `{agent: count}` (if multi-agent) |
+| `model_breakdown` | dict | `{model: count}` (if multi-model) |
+| `finish_breakdown` | dict | `{finish_reason: count}` |
+| `reasoning_parts` | int | Total reasoning content blocks |
+| `text_parts` | int | Total text content blocks |
+| `autonomy_ratio` | float | assistant_turns / total_turns |
+| `user_turns` | int | Count of user messages |
+| `assistant_turns` | int | Count of assistant messages |
+
+#### Output & Patch
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `has_patch` | bool | Whether a patch was generated |
+| `patch_lines` | int | Lines in the generated patch |
+| `files_changed` | int | Number of modified files |
+| `additions` | int | Lines added |
+| `deletions` | int | Lines removed |
+| `churn` | int | additions + deletions |
+| `net_change` | int | additions - deletions |
+
+#### Timing
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `time_to_first_token` | float | Latency to first token (s) |
+| `output_tokens_per_sec` | float | Output token throughput |
+| `time_to_last_token` | float | Latency to complete response (s) |
+
+#### Plan Tracking
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `plan_items` | int | Initial todo item count |
+| `plan_completion_ratio` | float | Fraction of items completed |
+| `plan_update_count` | int | Number of plan snapshots |
+
+### Per-Step Analytics
+
+Computed by `compute_step_analytics()` for each trajectory step.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `index` | int | Step position |
+| `role` | str | "user" or "assistant" |
+| `agent` | str | Agent identifier |
+| `duration_s` | float | Step duration (seconds) |
+| `tool_time_ms` | float | Tool execution time (ms) |
+| `tool_time_share` | float | Tool time / step duration (0-1) |
+| `tok_total` | int | Total tokens |
+| `tok_per_s` | float | Token throughput |
+| `cache_ratio` | float | Cache read / total tokens (0-1) |
+| `non_cache_tok` | int | Fresh input tokens |
+| `out_in_ratio` | float | Output / input token ratio |
+| `tool_calls` | int | Tool invocation count |
+| `finish` | str | Finish reason |
+| `part_mix` | str | Comma-separated part types present |
+| `idle_before_s` | float | Gap from previous step (seconds) |
 
 ## Data Flow
 
 ```
-parse_steps(raw)           → list[step_dict]     # Normalize trajectory JSON
-build_message_metrics(steps) → list[row_dict]    # Per-message metrics for tables/charts
-compute_metrics(steps, raw)  → dict              # Aggregate metrics for overview
-compute_step_analytics(steps) → list[analytics]  # Per-step derived metrics
-detect_phases(analytics)      → list[phase]      # Phase segmentation
-generate_insights(analytics, phases, steps) → list[str]  # Behavioral observations
+JSON file
+  |
+  v
+load_trajectory(path)            --> raw dict
+  |
+  v
+parse_steps(raw)                 --> list[step_dict]         # Normalize trajectory messages
+  |
+  +--> build_message_metrics(steps) --> list[row_dict]       # Per-step metrics for charts
+  |
+  +--> compute_metrics(steps, raw)  --> dict                 # 70+ aggregate metrics
+  |
+  +--> compute_step_analytics(steps) --> list[analytics]     # Per-step derived metrics
+         |
+         +--> detect_phases(analytics)     --> list[phase]   # Phase segmentation
+         |
+         +--> generate_insights(analytics, phases, steps)    # Behavioral observations
+         |
+         +--> compute_health_verdict(metrics, analytics)     # Traffic-light verdicts
 ```
 
-### Per-step fields parsed
+## Module Structure
 
-`index`, `role`, `agent`, `mode`, `model_id`, `provider_id`, `duration`, `cost`, `finish`, `tokens` (total/input/output/reasoning/cache_read/cache_write), `time_created_ms`, `time_completed_ms`, `id`, `parent_id`, `session_id`, `message_id`, `cwd`, `root`, `parts`, `tool_calls`, `tool_call_count`, `error_count`, `has_reasoning`, `text_preview`.
-
-### Per-tool-call fields parsed
-
-`tool_name`, `tool_id`, `status`, `title`, `input`, `output`, `error`, `time_start`, `time_end`, `metadata` (sessionId, model, truncated, plus generic scalars).
+```
+trajectory_visualizer/
+  __init__.py      # Package marker
+  __main__.py      # CLI entry point (argparse)
+  data.py          # Loading, parsing, aggregate metrics, markdown formatters
+  analytics.py     # Per-step analytics, phase detection, behavioral insights
+  charts.py        # Plotly chart builders (10 chart types)
+  rendering.py     # Workflow HTML cards, step detail panel, card styling
+  styles.py        # Centralized CSS (APP_CSS, WORKFLOW_CSS)
+  app.py           # Gradio UI layout, callbacks, KPI builder
+  README.md        # This file
+```
