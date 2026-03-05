@@ -1,10 +1,8 @@
 """Data loading, parsing, and aggregate metrics."""
 
-import glob
 import json
 import os
 import statistics
-from pathlib import Path
 from typing import Any
 
 
@@ -259,23 +257,24 @@ def _build_hotspots_md(rows: list[dict]) -> str:
     top_d = sorted(with_dur, key=lambda r: r["duration"], reverse=True)[:5]
     top_t = sorted(rows, key=lambda r: r["tokens_total"], reverse=True)[:5]
 
-    def fmt_table(items: list[dict], value_field: str, value_header: str, value_fmt: str) -> str:
+    def fmt_table(items: list[dict], value_field: str, value_header: str,
+                  value_fmt: str, extra_cols: list[tuple[str, str, str]] | None = None) -> str:
         if not items:
             return "*No data*"
+        extra = extra_cols or [("tokens_total", "Tokens", ","), ("tool_calls", "Tool Calls", "")]
+        hdr = " | ".join(h for _, h, _ in extra)
         lines = [
-            f"| Step | Role | {value_header} | Tokens | Tool calls |",
-            "|---:|---|---:|---:|---:|",
+            f"| Step | Role | {value_header} | {hdr} |",
+            "|---:|---|" + "---:|" * (1 + len(extra)),
         ]
         for r in items:
             v = r[value_field]
-            if isinstance(v, (int, float)):
-                v_str = format(v, value_fmt)
-            else:
-                v_str = str(v)
-            lines.append(
-                f"| {r['index']} | `{r['role']}` | {v_str} | "
-                f"{r['tokens_total']:,} | {r['tool_calls']} |"
+            v_str = format(v, value_fmt) if isinstance(v, (int, float)) else str(v)
+            extras = " | ".join(
+                format(r[f], ef) if isinstance(r[f], (int, float)) and ef else str(r[f])
+                for f, _, ef in extra
             )
+            lines.append(f"| {r['index']} | `{r['role']}` | {v_str} | {extras} |")
         return "\n".join(lines)
 
     sections = [
@@ -283,7 +282,9 @@ def _build_hotspots_md(rows: list[dict]) -> str:
         "**Top latency steps**\n\n"
         + fmt_table(top_d, "duration", "Duration (s)", ".2f")
         + "\n\n**Top token-load steps**\n\n"
-        + fmt_table(top_t, "tokens_total", "Tokens", ",")
+        + fmt_table(top_t, "tokens_total", "Tokens", ",",
+                    extra_cols=[("tool_calls", "Tool Calls", ""),
+                                ("duration", "Duration (s)", ".2f")])
     ]
 
     # Lowest cache ratio (assistant steps with tokens, excluding 0-token steps)
@@ -292,7 +293,7 @@ def _build_hotspots_md(rows: list[dict]) -> str:
     if asst_with_tok:
         low_cache = sorted(asst_with_tok, key=lambda r: r["cache_ratio"])[:5]
         lines = [
-            "| Step | Role | Cache % | Fresh Input | Tokens |",
+            "| Step | Role | Cache Read % | Fresh Input | Tokens |",
             "|---:|---|---:|---:|---:|",
         ]
         for r in low_cache:
@@ -301,7 +302,7 @@ def _build_hotspots_md(rows: list[dict]) -> str:
                 f"{r['non_cache_tokens']:,} | {r['tokens_total']:,} |"
             )
         sections.append(
-            "\n\n**Lowest cache ratio steps** (optimization targets)\n\n"
+            "\n\n**Lowest cache read steps** (optimization targets)\n\n"
             + "\n".join(lines)
         )
 
@@ -318,12 +319,12 @@ def _build_per_message_md(rows: list[dict], limit: int = 80) -> str:
     lines = ["### Per-Message Diagnostics", ""]
     if has_agent:
         lines.append(
-            "| Step | Role | Agent | Finish | Dur(s) | Tokens | Tok/s | Cache % | Non-cache | Out/In | Tool calls | Tool wait % | Parts (R/T) |"
+            "| Step | Role | Agent | Finish | Duration (s) | Tokens | Tok/s | Cache Read % | Fresh Input | Out/In Ratio | Tool Calls | Tool Wait % | Parts (R/T) |"
         )
         lines.append("|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
     else:
         lines.append(
-            "| Step | Role | Finish | Dur(s) | Tokens | Tok/s | Cache % | Non-cache | Out/In | Tool calls | Tool wait % | Parts (R/T) |"
+            "| Step | Role | Finish | Duration (s) | Tokens | Tok/s | Cache Read % | Fresh Input | Out/In Ratio | Tool Calls | Tool Wait % | Parts (R/T) |"
         )
         lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
 
@@ -331,17 +332,18 @@ def _build_per_message_md(rows: list[dict], limit: int = 80) -> str:
         dur = "N/A" if r["duration"] is None else f"{r['duration']:.2f}"
         tokps = "N/A" if r["tokens_per_sec"] is None else f"{r['tokens_per_sec']:.1f}"
         parts = f"{r['reasoning_parts']}/{r['text_parts']}"
+        finish = _friendly_finish(r['finish']) or '-'
         if has_agent:
             agent = r.get("agent", "") or "-"
             lines.append(
-                f"| {r['index']} | `{r['role']}` | `{agent}` | `{r['finish'] or '-'}` | {dur} | "
+                f"| {r['index']} | `{r['role']}` | `{agent}` | `{finish}` | {dur} | "
                 f"{r['tokens_total']:,} | {tokps} | {r['cache_ratio'] * 100:.1f}% | "
                 f"{r['non_cache_tokens']:,} | {r['output_input_ratio']:.2f} | {r['tool_calls']} | "
                 f"{r['tool_time_share'] * 100:.2f}% | {parts} |"
             )
         else:
             lines.append(
-                f"| {r['index']} | `{r['role']}` | `{r['finish'] or '-'}` | {dur} | "
+                f"| {r['index']} | `{r['role']}` | `{finish}` | {dur} | "
                 f"{r['tokens_total']:,} | {tokps} | {r['cache_ratio'] * 100:.1f}% | "
                 f"{r['non_cache_tokens']:,} | {r['output_input_ratio']:.2f} | {r['tool_calls']} | "
                 f"{r['tool_time_share'] * 100:.2f}% | {parts} |"
@@ -640,11 +642,11 @@ def compute_health_verdict(metrics: dict, step_analytics: list[dict]) -> list[di
     # Cache efficiency
     avg_cache = metrics.get("avg_cache_ratio", 0)
     if avg_cache >= 60:
-        status, detail = "good", f"Avg cache ratio {avg_cache}% — strong cache reuse"
+        status, detail = "good", f"Avg cache read {avg_cache}% — strong cache reuse"
     elif avg_cache >= 30:
-        status, detail = "warn", f"Avg cache ratio {avg_cache}% — moderate cache reuse"
+        status, detail = "warn", f"Avg cache read {avg_cache}% — moderate cache reuse"
     else:
-        status, detail = "bad", f"Avg cache ratio {avg_cache}% — most input tokens are fresh"
+        status, detail = "bad", f"Avg cache read {avg_cache}% — most input tokens are fresh"
     verdicts.append({"metric": "Cache Efficiency", "status": status, "label": f"{avg_cache}%", "detail": detail})
 
     # Tool success rate
@@ -688,27 +690,6 @@ def compute_health_verdict(metrics: dict, step_analytics: list[dict]) -> list[di
 
     return verdicts
 
-
-def discover_trajectory_files(base_dir: str) -> list[str]:
-    """Glob for trajectory JSON files under base_dir.
-
-    Searches all ``**/*.json`` files recursively and keeps only those
-    that look like trajectory files (contain a top-level "trajectory" key).
-    """
-    pattern = os.path.join(base_dir, "**", "*.json")
-    candidates = sorted(glob.glob(pattern, recursive=True))
-    files: list[str] = []
-    for fp in candidates:
-        try:
-            with open(fp, "r", encoding="utf-8") as f:
-                # Peek at the first 4 KB to check for the "trajectory" key
-                # without parsing the entire file.
-                head = f.read(4096)
-            if '"trajectory"' in head:
-                files.append(fp)
-        except OSError:
-            continue
-    return files
 
 
 def format_session_md(timing: dict, metadata: dict, retry: dict,
@@ -785,7 +766,7 @@ def format_performance_md(metrics: dict, wall_fmt: str) -> str:
 | \u2003Reasoning | {metrics['tokens']['reasoning']:,} |
 | \u2003Cache read | {metrics['tokens']['cache_read']:,} |
 | \u2003Cache write | {metrics['tokens']['cache_write']:,} |
-| Non-cache tokens | {metrics['non_cache_tokens']:,} ({metrics['non_cache_ratio']}%) |
+| Fresh input tokens | {metrics['non_cache_tokens']:,} ({metrics['non_cache_ratio']}%) |
 | Avg tokens / step | {metrics['avg_tokens_per_step']:,} |
 | Tokens / second | {metrics['tokens_per_second']:,} |
 | Median tokens / second | {metrics['median_tokens_per_second']:,} |
@@ -808,7 +789,7 @@ def format_behavioral_md(metrics: dict) -> str:
 | No-tool assistant steps | {metrics['no_tool_assistant_steps']} |
 | Median assistant step tokens | {metrics['median_step_tokens']:,} |
 | P95 assistant step tokens | {metrics['p95_step_tokens']:,} |
-| Avg cache-read ratio | {metrics['avg_cache_ratio']}% |
+| Avg cache read % | {metrics['avg_cache_ratio']}% |
 | Cache-dominant assistant steps (\u226590%) | {metrics['cache_dominant_steps']} |
 | Tool execution time (sum) | {metrics['tool_time_total']}s |
 | Tool-wait share of step time | {metrics['tool_wait_share']}% |
@@ -913,6 +894,42 @@ def extract_agent_info(steps: list[dict]) -> tuple[str, str, str]:
     return model_id, provider_id, agent_id
 
 
+_FINISH_LABELS = {
+    "tool-calls": "Tool Call",
+    "stop": "Completed",
+    "end_turn": "End Turn",
+}
+
+
+def _friendly_finish(raw: str | None) -> str:
+    """Map internal finish-reason enums to user-friendly labels."""
+    if not raw:
+        return ""
+    return _FINISH_LABELS.get(raw, raw.replace("-", " ").replace("_", " ").title())
+
+
+_PART_LABELS = {
+    "text": "Text",
+    "reasoning": "Reason",
+    "tool_call": "Tool",
+    "step_start": "Start",
+    "step_finish": "Finish",
+    "snapshot": "Snap",
+    "patch": "Patch",
+}
+
+
+def _friendly_parts(part_mix: str) -> str:
+    """Convert comma-separated part types to compact friendly labels."""
+    if not part_mix:
+        return ""
+    types = [t.strip() for t in part_mix.split(",") if t.strip()]
+    labels = [_PART_LABELS.get(t, t.replace("_", " ").title()) for t in types]
+    if len(labels) <= 3:
+        return " · ".join(labels)
+    return " · ".join(labels[:2]) + f" +{len(labels) - 2}"
+
+
 def build_analytics_dataframe(step_analytics: list[dict]) -> list[dict]:
     """Convert step analytics into flat rows suitable for a DataFrame."""
     has_agents = any(a.get("agent") for a in step_analytics)
@@ -922,18 +939,18 @@ def build_analytics_dataframe(step_analytics: list[dict]) -> list[dict]:
         if has_agents:
             row["agent"] = a.get("agent", "")
         row.update({
-            "dur(s)": a["duration_s"],
-            "tok_total": a["tok_total"],
-            "tok/s": round(a["tok_per_s"]) if a["tok_per_s"] is not None else None,
-            "cache%": round(a["cache_ratio"] * 100, 1),
-            "non_cache": a["non_cache_tok"],
-            "out/in": round(a["out_in_ratio"], 3) if a["out_in_ratio"] is not None else None,
-            "tool#": a["tool_calls"],
-            "tool_share%": (round(a["tool_time_share"] * 100, 1)
+            "Duration (s)": a["duration_s"],
+            "Total Tokens": a["tok_total"],
+            "Tok/s": round(a["tok_per_s"]) if a["tok_per_s"] is not None else None,
+            "Cache Read %": round(a["cache_ratio"] * 100, 1),
+            "Fresh Input": a["non_cache_tok"],
+            "Out/In Ratio": round(a["out_in_ratio"], 3) if a["out_in_ratio"] is not None else None,
+            "Tool Calls": a["tool_calls"],
+            "Tool Wait %": (round(a["tool_time_share"] * 100, 1)
                             if a["tool_time_share"] is not None else None),
-            "finish": a["finish"],
-            "parts": a["part_mix"],
-            "idle(s)": a["idle_before_s"],
+            "Finish": _friendly_finish(a["finish"]),
+            "Parts": _friendly_parts(a["part_mix"]),
+            "Idle Gap (s)": a["idle_before_s"],
         })
         rows.append(row)
     return rows

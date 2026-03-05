@@ -1,4 +1,4 @@
-# Trajectory Visualizer
+# Trajectory Insight Finder
 
 Gradio-based UI to visualize agent execution trajectories, inspect individual steps, and analyze performance across token usage, tool calls, caching, and behavioral patterns.
 
@@ -6,14 +6,13 @@ Gradio-based UI to visualize agent execution trajectories, inspect individual st
 
 ```bash
 # From the project root
-python -m toolkits.trajectory_visualizer [--port 7860] [--share] [--trajectory-dir PATH]
+python -m toolkits.trajectory_visualizer [--port 7860] [--share]
 ```
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--port` | `7860` | Server port |
 | `--share` | off | Create a public Gradio link |
-| `--trajectory-dir` | project root | Base directory for trajectory files |
 
 Once launched, open the UI in your browser at:
 
@@ -23,11 +22,9 @@ http://localhost:7860
 
 If you specified a custom port (e.g. `--port 8080`), use that port instead. With `--share`, Gradio will also print a temporary public URL (e.g. `https://xxxxx.gradio.live`).
 
-Trajectory files are discovered recursively under the given directory by scanning all `**/*.json` files that contain a top-level `"trajectory"` key.
-
 ### Loading a Trajectory
 
-Use the dropdown to select a discovered file or upload a JSON file directly. The visualizer auto-loads when the dropdown selection changes.
+Upload a trajectory JSON file using the upload widget and click **Load**.
 
 ## Tabs & Features
 
@@ -84,27 +81,56 @@ Use the dropdown to select a discovered file or upload a JSON file directly. The
 
 **Output & Agent Stats** — Patch info (lines, size), files changed, additions/deletions, ground truth reference, role breakdown, finish states, tool status breakdown.
 
-**Message Hotspots** — Automatically ranked:
-- Top 5 slowest steps (by duration)
-- Top 5 highest-token steps
-- Top 5 lowest cache-ratio assistant steps (optimization targets)
-
-**Per-Message Deep Dive** — Expandable table with full per-step breakdown: step index, role, agent, finish, duration, tokens, tok/s, cache %, non-cache tokens, output/input ratio, tool calls, tool wait %, parts summary.
-
-### Charts
+**Performance accordion** — Token consumption, step latency, and phase timeline:
 
 | Chart | Type | Description |
 |-------|------|-------------|
-| Token Usage | Stacked bar | Non-overlapping segments: fresh input, cache read, output, reasoning. Toggle per-step / cumulative. |
+| Token Usage | Stacked bar | Fresh input, cache read, output, reasoning. Toggle per-step / cumulative. |
 | Step Duration | Bar + avg line | Duration per step, color-coded by role/type. Outliers annotated. |
-| Context Growth | Multi-line | Cumulative input, fresh input, and cache read — shows context window pressure over time. |
+| Phase Timeline | Stacked horizontal bar | Proportional Boot / Steady / Closeout phase lengths. |
+
+**Efficiency accordion** — Context growth, cache behavior, and behavioral heatmap:
+
+| Chart | Type | Description |
+|-------|------|-------------|
+| Context Growth | Multi-line | Cumulative input, fresh input, and cache read — shows context window pressure. |
+| Behavioral Heatmap | Heatmap | Normalized (0-1) per-metric heatmap across all steps (cache ratio, tool time share, tok/s, output/input ratio, fresh input tokens, idle gap). |
+| Cache-Read Ratio | Bar + avg line | Cache hit % per step with average reference line. |
+
+**Tools accordion** — Tool usage, throughput, duration:
+
+| Chart | Type | Description |
+|-------|------|-------------|
 | Per-Step Efficiency | Dual-axis | Tokens/s and non-cache tok/s lines vs tool-wait % bar overlay. |
 | Tool Call Frequency | Horizontal bar | Call count per tool name, sorted ascending. |
-| Cache-Read Ratio | Bar + avg line | Cache hit % per step with average reference line. |
+| Tool Duration by Type | Grouped bar | Avg / P95 / max duration per tool name. |
 
 All charts include:
 - **Phase overlays** — Semi-transparent vertical regions showing detected Boot / Steady / Closeout phases.
 - **Outlier annotations** — Spikes exceeding 2 standard deviations are labeled automatically.
+
+**Phase Detection** — Automatic segmentation into up to 3 phases:
+
+| Phase | Detection Rule | Meaning |
+|-------|---------------|---------|
+| Boot | Cumulative tokens < 15% but runtime > 30% | Initialization overhead |
+| Steady | Between Boot and Closeout | Main execution |
+| Closeout | Trailing stop/end_turn steps with above-average tokens | Final output generation |
+
+Each phase reports its share of total tokens and runtime.
+
+**Behavioral Insights** — Auto-generated observations routed to relevant accordion sections:
+
+| Insight | Trigger | Section |
+|---------|---------|---------|
+| Tool-heavy steps | Tool time > 50% of step duration | Performance |
+| Cache behavior | Reports median and minimum cache ratio | Efficiency |
+| Slow turns | Duration > 30s with tool-wait < 30% | Performance |
+| High-token turns near end | Largest token steps in final 30% of trajectory | Performance |
+| Context escalation | 4+ consecutive non-decreasing token counts | Efficiency |
+| Tool repetition | Same tool + input called 3+ times | Tools |
+
+**Per-Step Deep Dive** — Expandable section with message hotspots (top 5 slowest, highest-token, lowest cache-ratio steps) and a full per-step breakdown table.
 
 ### Workflow
 
@@ -120,45 +146,11 @@ All charts include:
 - *Content gate* (OR within, AND with role): **Tool Calls**, **Errors**, **Reasoning** — narrows to steps containing selected content types
 - **Keyword search** — Filters by text preview, tool names, and tool arguments
 
-**Detail Panel** — Click any step card to inspect:
-- Metadata table (role, agent, model, provider, duration, timestamps, finish, IDs, CWD, etc.)
-- Token breakdown: input | output | reasoning | cache read | cache write | total
+**Detail Panel** — Click any step card to inspect (rendered as styled HTML):
+- Color-coded header banner with role, step type, and agent
+- Metadata table (duration, timestamps, finish reason, IDs, CWD, etc.)
 - Content sections: text blocks, reasoning blocks, tool calls (with collapsible input/output/error), patches (hash + files)
 - Tool call metadata: tool ID, session, model/provider, subagent type, truncated flag
-
-### Analytics
-
-**Phase Detection** — Automatic segmentation into up to 3 phases:
-
-| Phase | Detection Rule | Meaning |
-|-------|---------------|---------|
-| Boot | Cumulative tokens < 15% but runtime > 30% | Initialization overhead |
-| Steady | Between Boot and Closeout | Main execution |
-| Closeout | Trailing stop/end_turn steps with above-average tokens | Final output generation |
-
-Each phase reports its share of total tokens and runtime.
-
-**Behavioral Insights** — Auto-generated observations:
-
-| Insight | Trigger | Section |
-|---------|---------|---------|
-| Tool-heavy steps | Tool time > 50% of step duration | Performance |
-| Cache behavior | Reports median and minimum cache ratio | Efficiency |
-| Slow turns | Duration > 30s with tool-wait < 30% | Performance |
-| High-token turns near end | Largest token steps in final 30% of trajectory | Performance |
-| Context escalation | 4+ consecutive non-decreasing token counts | Efficiency |
-| Tool repetition | Same tool + input called 3+ times | Tools |
-
-**Behavioral Heatmap** — Normalized (0-1) per-metric heatmap across all steps, with 6 metrics:
-- Cache Ratio, Tool Time Share, Tok/s, Output/Input Ratio, Fresh Input Tokens, Idle Gap
-
-**Phase Timeline** — Stacked horizontal bar showing proportional phase lengths.
-
-**Tool Duration by Type** — Grouped bar chart of avg / P95 / max duration per tool name.
-
-**Idle Gaps** — Bar chart of inter-step time gaps with average reference line.
-
-**Per-Step Metrics Table** — Sortable dataframe: idx, role, agent, duration, tokens, tok/s, cache %, non-cache, out/in ratio, tool count, tool share %, finish, parts, idle gap.
 
 ### Raw Data
 
@@ -327,7 +319,7 @@ trajectory_visualizer/
   __main__.py      # CLI entry point (argparse)
   data.py          # Loading, parsing, aggregate metrics, markdown formatters
   analytics.py     # Per-step analytics, phase detection, behavioral insights
-  charts.py        # Plotly chart builders (10 chart types)
+  charts.py        # Plotly chart builders (9 chart types)
   rendering.py     # Workflow HTML cards, step detail panel, card styling
   styles.py        # Centralized CSS (APP_CSS, WORKFLOW_CSS)
   app.py           # Gradio UI layout, callbacks, KPI builder

@@ -1,20 +1,21 @@
 """Gradio UI for trajectory visualization."""
 
+import base64
 import html
 import json
 import os
+import re
 
 import gradio as gr
 import plotly.graph_objects as go
-import pandas as pd
 
 from .data import (
     load_trajectory, parse_steps, build_message_metrics, compute_metrics,
-    discover_trajectory_files, _build_hotspots_md,
+    _build_hotspots_md,
     _build_per_message_md, compute_health_verdict,
     format_session_md, format_performance_md,
     format_behavioral_md, format_output_md,
-    extract_agent_info, build_analytics_dataframe,
+    extract_agent_info,
     wall_clock_fmt, format_banner_html,
 )
 from .analytics import compute_step_analytics, detect_phases, generate_insights
@@ -23,17 +24,32 @@ from .charts import (
     build_cache_ratio_chart, build_efficiency_chart,
     build_analytics_heatmap, build_phase_chart,
     build_context_growth_chart,
-    build_tool_duration_chart, build_idle_gap_chart,
+    build_tool_duration_chart,
 )
 from .rendering import render_workflow_html, format_step_detail
 from .styles import APP_CSS
+
+_DETAIL_PLACEHOLDER = "<div id='wf-detail-content'><em>Click a step card to inspect details.</em></div>"
+
+
+def _prerender_step_details(steps: list[dict]) -> str:
+    """Pre-render all step details as HTML and return a base64-encoded JSON blob.
+
+    ``format_step_detail()`` now returns styled HTML directly, so no
+    markdown-it pass is needed.
+    """
+    details = {}
+    for step in steps:
+        details[str(step['index'])] = format_step_detail(step)
+    b64 = base64.b64encode(json.dumps(details).encode()).decode()
+    return f'<div data-b64="{b64}" style="display:none"></div>'
 
 
 def _map_insights_to_sections(insights: list[str]) -> dict[str, list[str]]:
     """Categorize insight strings into Performance / Efficiency / Tools sections."""
     sections: dict[str, list[str]] = {"performance": [], "efficiency": [], "tools": []}
     perf_kw = ("slow turn", "latency", "duration", "token turn", "token count", "largest token")
-    eff_kw = ("context escalation", "cache behavior", "cache_ratio", "non-decreasing")
+    eff_kw = ("context escalation", "cache behavior", "cache read", "non-decreasing")
     tool_kw = ("tool-heavy", "tool_time", "tool repetition", "retrying", "stuck")
     for ins in insights:
         low = ins.lower()
@@ -48,46 +64,159 @@ def _map_insights_to_sections(insights: list[str]) -> dict[str, list[str]]:
     return sections
 
 
+def _compute_anomalies(metrics: dict, message_rows: list[dict]) -> list[dict]:
+    """Return a list of anomaly dicts (type, step_idx, value_str) from metrics."""
+    anomalies: list[dict] = []
+    if not message_rows:
+        return anomalies
+
+    # Longest step by duration
+    with_dur = [r for r in message_rows if r.get("duration") is not None]
+    if with_dur:
+        longest = max(with_dur, key=lambda r: r["duration"])
+        anomalies.append({
+            "type": "Slowest",
+            "step_idx": longest["index"],
+            "value": f"{longest['duration']:.1f}s",
+        })
+
+    # Highest token step
+    if message_rows:
+        highest_tok = max(message_rows, key=lambda r: r["tokens_total"])
+        if highest_tok["tokens_total"] > 0:
+            anomalies.append({
+                "type": "Most Tokens",
+                "step_idx": highest_tok["index"],
+                "value": f"{highest_tok['tokens_total']:,} tok",
+            })
+
+    # Lowest cache ratio (assistant steps with tokens)
+    asst_with_tok = [r for r in message_rows
+                     if r.get("role") == "assistant" and r["tokens_total"] > 0]
+    if asst_with_tok:
+        lowest_cache = min(asst_with_tok, key=lambda r: r["cache_ratio"])
+        anomalies.append({
+            "type": "Lowest Cache",
+            "step_idx": lowest_cache["index"],
+            "value": f"{lowest_cache['cache_ratio'] * 100:.1f}%",
+        })
+
+    # Most tool calls
+    with_tools = [r for r in message_rows if r["tool_calls"] > 0]
+    if with_tools:
+        most_tools = max(with_tools, key=lambda r: r["tool_calls"])
+        anomalies.append({
+            "type": "Most Tools",
+            "step_idx": most_tools["index"],
+            "value": f"{most_tools['tool_calls']} calls",
+        })
+
+    # Error steps
+    error_steps = [r for r in message_rows if r.get("error_count", 0) > 0]
+    if error_steps:
+        anomalies.append({
+            "type": "Errors",
+            "step_idx": error_steps[0]["index"],
+            "value": f"{len(error_steps)} step(s)",
+        })
+
+    return anomalies[:5]
+
+
+def _build_card_jump_onclick(idx) -> str:
+    """Return a JS onclick string that switches to the Workflow tab,
+    scrolls step card *idx* into view, and clicks it."""
+    return (
+        f"(function(){{"
+        f"var tabs=document.querySelectorAll('.tab-nav button');"
+        f"if(tabs.length>1)tabs[1].click();"
+        f"setTimeout(function(){{"
+        f"var c=document.getElementById('wf-card-{idx}');"
+        f"if(c){{c.scrollIntoView({{behavior:'smooth',block:'center'}});c.click();}}"
+        f"}},200);"
+        f"}})()"
+    )
+
+
+def _build_anomaly_strip_html(anomalies: list[dict]) -> str:
+    """Render clickable anomaly badges with data-step-idx attributes."""
+    if not anomalies:
+        return ""
+    badges = []
+    for a in anomalies:
+        idx = a["step_idx"]
+        onclick = _build_card_jump_onclick(idx)
+        badges.append(
+            f"<span class='anomaly-badge' data-step-idx='{idx}'"
+            f" onclick=\"{onclick}\" style='cursor:pointer;'>"
+            f"{html.escape(a['type'])}: #{idx} ({html.escape(a['value'])})"
+            f"</span>"
+        )
+    return "<div class='anomaly-strip'>" + "".join(badges) + "</div>"
+
+
+
+_STEP_REF_RE = re.compile(r"\bstep (\d+)\b")
+
+
+def _linkify_step_refs(escaped_text: str) -> str:
+    """Replace 'step N' in html-escaped text with clickable spans that navigate to that workflow card."""
+    def _repl(m: re.Match) -> str:
+        idx = m.group(1)
+        onclick = _build_card_jump_onclick(idx)
+        return (
+            f"<span class='insight-step-link' onclick=\"{onclick}\">"
+            f"step {idx}</span>"
+        )
+    return _STEP_REF_RE.sub(_repl, escaped_text)
+
+
 def _build_insight_callout_html(insights: list[str], max_items: int = 2) -> str:
     """Render up to *max_items* insight callouts as styled HTML."""
     if not insights:
         return ""
     items = []
     for ins in insights[:max_items]:
+        text_html = _linkify_step_refs(html.escape(ins))
         items.append(
             f"<div class='insight-callout'>"
             f"<span class='insight-icon'>&#9432;</span> "
-            f"<span class='insight-text'>{html.escape(ins)}</span>"
+            f"<span class='insight-text'>{text_html}</span>"
             f"</div>"
         )
     return "".join(items)
 
 
-def _build_health_verdict_html(verdicts: list[dict]) -> str:
-    """Render health verdict as a horizontal strip of color-coded badges."""
-    if not verdicts:
-        return ""
-    status_colors = {
-        "good": ("#059669", "#d1fae5", "#065f46"),
-        "warn": ("#d97706", "#fef3c7", "#92400e"),
-        "bad": ("#dc2626", "#fee2e2", "#991b1b"),
+
+def _build_overview_kpi_html(metrics: dict, wall_fmt: str,
+                             verdicts: list[dict] | None = None) -> str:
+    """Build at-a-glance KPI card strip for Overview tab.
+
+    When *verdicts* is provided, matching KPI cards get a colored left border
+    and a tooltip with the verdict detail string.
+    """
+    # Build verdict lookup: metric label -> (status, detail)
+    _verdict_map: dict[str, tuple[str, str]] = {}
+    if verdicts:
+        # Map verdict metric names to KPI card labels
+        _metric_to_kpi = {
+            "Cache Efficiency": "Cache Read %",
+            "Tool Success": "Tool Success",
+            "Throughput": "Tokens",
+            "Token Efficiency": "Tokens",
+            "Errors": "Steps",
+        }
+        for v in verdicts:
+            kpi_label = _metric_to_kpi.get(v["metric"], "")
+            if kpi_label:
+                _verdict_map[kpi_label] = (v["status"], v["detail"])
+
+    _status_colors = {
+        "good": "#059669",
+        "warn": "#d97706",
+        "bad": "#dc2626",
     }
-    badges = []
-    for v in verdicts:
-        bg, bg_light, text_color = status_colors.get(v["status"], ("#6b7280", "#f3f4f6", "#374151"))
-        detail_escaped = html.escape(v["detail"])
-        badges.append(
-            f"<div class='hv-badge' style='background:{bg_light};border:1px solid {bg};' title='{detail_escaped}'>"
-            f"<span class='hv-dot' style='background:{bg};'></span>"
-            f"<span class='hv-metric' style='color:{text_color};'>{html.escape(v['metric'])}</span>"
-            f"<span class='hv-label' style='color:{text_color};'>{html.escape(v['label'])}</span>"
-            f"</div>"
-        )
-    return "<div class='hv-strip'>" + "".join(badges) + "</div>"
 
-
-def _build_overview_kpi_html(metrics: dict, wall_fmt: str) -> str:
-    """Build at-a-glance KPI card strip for Overview tab."""
     cards = [
         ("Steps", f"{metrics.get('total_steps', 0):,}",
          f"{metrics.get('assistant_steps', 0)} assistant"),
@@ -97,15 +226,25 @@ def _build_overview_kpi_html(metrics: dict, wall_fmt: str) -> str:
          f"{metrics.get('tokens_per_second', 0):,} tok/s"),
         ("Tool Success", f"{metrics.get('tool_success_rate', 0)}%",
          f"{metrics.get('tool_call_count', 0):,} calls"),
-        ("Cache Ratio", f"{metrics.get('avg_cache_ratio', 0)}%",
+        ("Cache Read %", f"{metrics.get('avg_cache_ratio', 0)}%",
          f"{metrics.get('cache_dominant_steps', 0)} dominant steps"),
-        ("Non-Cache", f"{metrics.get('non_cache_ratio', 0)}%",
+        ("Fresh Input", f"{metrics.get('non_cache_ratio', 0)}%",
          f"{metrics.get('non_cache_tokens', 0):,} tokens"),
     ]
     card_html = []
     for label, value, sub in cards:
+        verdict_info = _verdict_map.get(label)
+        extra_style = ""
+        title_attr = ""
+        data_attr = ""
+        if verdict_info:
+            status, detail = verdict_info
+            border_color = _status_colors.get(status, "#6b7280")
+            extra_style = f" style='border-left:4px solid {border_color};'"
+            title_attr = f" title='{html.escape(detail)}'"
+            data_attr = f" data-status='{html.escape(status)}'"
         card_html.append(
-            "<div class='ov-kpi-card'>"
+            f"<div class='ov-kpi-card'{extra_style}{title_attr}{data_attr}>"
             f"<div class='ov-kpi-label'>{html.escape(str(label))}</div>"
             f"<div class='ov-kpi-value'>{html.escape(str(value))}</div>"
             f"<div class='ov-kpi-sub'>{html.escape(str(sub))}</div>"
@@ -114,64 +253,49 @@ def _build_overview_kpi_html(metrics: dict, wall_fmt: str) -> str:
     return "<div class='ov-kpi-grid'>" + "".join(card_html) + "</div>"
 
 
-def build_ui(trajectory_dir: str) -> gr.Blocks:
+def build_ui() -> gr.Blocks:
     """Build the full Gradio Blocks UI."""
 
-    discovered = discover_trajectory_files(trajectory_dir)
-    choices = []
-    for fp in discovered:
-        try:
-            rel = os.path.relpath(fp, trajectory_dir)
-        except ValueError:
-            rel = fp
-        choices.append(rel)
-
-    with gr.Blocks(title="Trajectory Visualizer") as app:
+    with gr.Blocks(title="Trajectory Insight Finder") as app:
         # Per-session state via gr.State
         state_steps = gr.State([])
 
-        gr.Markdown("# Trajectory Profiler & Visualizer\nLoad a trajectory JSON to inspect agent execution steps, token usage, and tool calls.")
+        gr.Markdown("# Trajectory Insight Finder\nLoad a trajectory JSON to inspect agent execution steps, token usage, and tool calls.")
 
-        # -- File selection row --
+        # -- File selection row (centered, compact) --
         with gr.Row(equal_height=True):
-            file_dropdown = gr.Dropdown(
-                choices=choices,
-                label="Trajectory file",
-                scale=4,
-                interactive=True,
-                value=choices[0] if choices else None,
-            )
-            file_upload = gr.File(
-                label="Upload JSON",
-                file_types=[".json"],
-                scale=2,
-            )
-            load_btn = gr.Button("Load", variant="primary", scale=0, min_width=60)
+            gr.Column(scale=1)  # left spacer
+            with gr.Column(scale=2, min_width=300):
+                with gr.Row(equal_height=True):
+                    file_upload = gr.File(
+                        label="Upload trajectory JSON",
+                        file_types=[".json"],
+                        scale=3,
+                    )
+                    load_btn = gr.Button("Load", variant="primary", scale=0, min_width=60)
+            gr.Column(scale=1)  # right spacer
 
         # Summary banner (appears after load)
         summary_banner = gr.HTML("", elem_classes=["summary-banner"])
+
+        # Anomaly strip (clickable badges for notable steps)
+        anomaly_strip_html = gr.HTML("")
 
         # -- Tabs --
         with gr.Tabs():
             # ===== Overview Tab (unified — includes former Analytics content) =====
             with gr.TabItem("Overview"):
                 overview_kpi_html = gr.HTML("", elem_classes=["overview-kpi-strip"])
-                health_verdict_html = gr.HTML("")
 
                 with gr.Row(equal_height=False):
-                    with gr.Column(scale=1, min_width=320):
+                    with gr.Column(scale=1, min_width=260):
                         meta_md = gr.Markdown(
                             "*Select a trajectory file and click Load.*",
                             elem_classes=["overview-card"],
                         )
-                    with gr.Column(scale=1, min_width=320):
-                        output_md = gr.Markdown("", elem_classes=["overview-card"])
-
-                with gr.Row(equal_height=False):
-                    with gr.Column(scale=1, min_width=320):
                         analytics_phase_md = gr.Markdown("", elem_classes=["overview-card"])
-                    with gr.Column(scale=1, min_width=320):
-                        analytics_insights_md = gr.Markdown("", elem_classes=["overview-card"])
+                    with gr.Column(scale=2, min_width=400):
+                        output_md = gr.Markdown("", elem_classes=["overview-card"])
 
                 with gr.Accordion("Performance — Token consumption, step latency, and phase timeline",
                                  open=True, elem_classes=["per-message-acc"]):
@@ -193,17 +317,22 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
 
                 with gr.Accordion("Efficiency — Context growth, cache behavior, and behavioral heatmap",
                                  open=False, elem_classes=["per-message-acc"]):
-                    eff_insights_html = gr.HTML("")
                     with gr.Row(equal_height=True):
                         context_growth_chart = gr.Plot(label="Context Growth")
                         analytics_heatmap = gr.Plot(label="Behavioral Heatmap")
-                    with gr.Row(equal_height=True):
-                        cache_chart = gr.Plot(label="Cache Ratio")
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=2, min_width=400):
+                            cache_chart = gr.Plot(label="Cache Read %")
+                        with gr.Column(scale=1, min_width=200):
+                            eff_insights_html = gr.HTML("")
 
                 with gr.Accordion("Tools — Tool usage, throughput, duration, and idle gaps",
                                  open=False, elem_classes=["per-message-acc"]):
-                    behavior_md = gr.Markdown("", elem_classes=["overview-card"])
-                    tools_insights_html = gr.HTML("")
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=3, min_width=400):
+                            behavior_md = gr.Markdown("", elem_classes=["overview-card"])
+                        with gr.Column(scale=1, min_width=200):
+                            tools_insights_html = gr.HTML("")
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=2, min_width=560):
                             efficiency_chart = gr.Plot(label="Per-Step Efficiency")
@@ -211,15 +340,9 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                             tool_chart = gr.Plot(label="Tool Call Frequency")
                     with gr.Row(equal_height=True):
                         tool_duration_chart = gr.Plot(label="Tool Duration by Type")
-                        idle_gap_chart = gr.Plot(label="Idle Gaps")
 
                 with gr.Accordion("Per-Step Deep Dive", open=False, elem_classes=["per-message-acc"]):
                     hotspots_md = gr.Markdown("", elem_classes=["overview-card"])
-                    analytics_table = gr.Dataframe(
-                        label="Per-Step Metrics",
-                        interactive=False,
-                        wrap=True,
-                    )
                     per_message_md = gr.Markdown("", elem_classes=["overview-card"])
 
             # ===== Workflow Tab =====
@@ -249,15 +372,26 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                                     c.classList.remove('wf-active');
                                 });
                                 card.classList.add('wf-active');
-                                var idx = parseInt(card.dataset.stepIdx);
-                                if (!isNaN(idx)) {
-                                    trigger('click', {step_index: idx});
-                                }
+                                var idx = card.dataset.stepIdx;
+                                var storeEl = document.querySelector('#wf-detail-store [data-b64]');
+                                var target = document.getElementById('wf-detail-content');
+                                if (!storeEl) { console.warn('wf-click: detail store not found'); return; }
+                                if (!target) { console.warn('wf-click: detail panel not found'); return; }
+                                try {
+                                    var details = JSON.parse(atob(storeEl.dataset.b64));
+                                    if (details[idx] != null) {
+                                        target.innerHTML = details[idx];
+                                    }
+                                } catch(ex) { console.error('wf-click:', ex); }
                             });
                             """,
                         )
                     with gr.Column(scale=2, min_width=300, elem_classes=["detail-panel"]):
-                        detail_md = gr.Markdown("*Click a step card to inspect details.*")
+                        detail_html = gr.HTML(
+                            _DETAIL_PLACEHOLDER,
+                            elem_id="wf-detail-panel",
+                        )
+                detail_store = gr.HTML("", elem_id="wf-detail-store")
 
             # ===== Raw Data Tab =====
             with gr.TabItem("Raw Data"):
@@ -279,12 +413,11 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             return (
                 [],              # state_steps
                 banner,          # summary_banner
+                "",              # anomaly_strip_html
                 "",              # overview_kpi_html
-                "",              # health_verdict_html
                 detail,          # meta_md
                 "",              # output_md
                 "",              # analytics_phase_md
-                "",              # analytics_insights_md
                 "",              # metrics_md
                 "",              # perf_insights_html
                 f, f,            # token_chart, duration_chart
@@ -295,23 +428,21 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                 "",              # behavior_md
                 "",              # tools_insights_html
                 f, f,            # efficiency_chart, tool_chart
-                f, f,            # tool_duration_chart, idle_gap_chart
+                f,               # tool_duration_chart
                 "",              # hotspots_md
-                pd.DataFrame(),  # analytics_table
                 "",              # per_message_md
                 "",              # wf_count_html
                 "<div></div>",   # workflow_html
-                "*Click a step card to inspect details.*",  # detail_md
+                "",              # detail_store
+                _DETAIL_PLACEHOLDER,  # detail_html
                 "",              # raw_json
             )
 
-        def do_load(dropdown_val, upload_obj):
-            """Load trajectory from dropdown or upload."""
+        def do_load(upload_obj):
+            """Load trajectory from uploaded file."""
             file_path = None
             if upload_obj is not None:
                 file_path = upload_obj if isinstance(upload_obj, str) else upload_obj.name
-            elif dropdown_val:
-                file_path = os.path.join(trajectory_dir, dropdown_val)
 
             if not file_path or not os.path.isfile(file_path):
                 return _empty_result(detail="*No file selected or file not found.*")
@@ -331,7 +462,10 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             model_id, provider_id, agent_id = extract_agent_info(steps)
             _, wfmt = wall_clock_fmt(metrics)
             banner = format_banner_html(os.path.basename(file_path), metrics, wfmt)
-            kpi_html = _build_overview_kpi_html(metrics, wfmt)
+            # Verdicts computed early so KPI cards can show status indicators
+            verdicts = compute_health_verdict(metrics,
+                                              compute_step_analytics(steps) if steps else [])
+            kpi_html = _build_overview_kpi_html(metrics, wfmt, verdicts=verdicts)
 
             # -- Overview markdown sections --
             meta_text = format_session_md(
@@ -348,47 +482,39 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             # -- Workflow tab --
             wf_html = render_workflow_html(steps)
             wf_count = f"<div class='wf-count'>Showing {len(steps)} of {len(steps)} steps</div>"
+            detail_store_val = _prerender_step_details(steps)
 
             # -- Analytics (computed before charts so annotations can use phases) --
             step_analytics = compute_step_analytics(steps)
             phases = detect_phases(step_analytics)
 
             # -- Charts --
-            tok_fig = build_token_chart(steps, cumulative=False,
-                                        step_analytics=step_analytics, phases=phases)
-            dur_fig = build_duration_chart(steps, step_analytics=step_analytics, phases=phases)
+            tok_fig = build_token_chart(steps, cumulative=False, phases=phases)
+            dur_fig = build_duration_chart(steps, phases=phases)
             tl_fig = build_tool_chart(steps)
-            cache_fig = build_cache_ratio_chart(message_rows,
-                                                step_analytics=step_analytics, phases=phases)
-            eff_fig = build_efficiency_chart(message_rows,
-                                            step_analytics=step_analytics, phases=phases)
-            ctx_fig = build_context_growth_chart(message_rows,
-                                                step_analytics=step_analytics, phases=phases)
+            cache_fig = build_cache_ratio_chart(message_rows, phases=phases)
+            eff_fig = build_efficiency_chart(message_rows, phases=phases)
+            ctx_fig = build_context_growth_chart(message_rows, phases=phases)
             insights_list = generate_insights(step_analytics, phases, steps=steps)
             tool_dur_fig = build_tool_duration_chart(steps)
-            idle_fig = build_idle_gap_chart(step_analytics)
 
             phase_md = "### Phase Summary\n\n" + "\n\n".join(
                 f"**{p['name']}** (idx {p['start_idx']}\u2013{p['end_idx']}): "
                 f"{p['token_share']}% tokens, {p['runtime_share']}% time"
                 for p in phases)
-            insights_md = "### Behavioral Insights\n\n" + "\n".join(
-                f"- {ins}" for ins in insights_list)
-
             heatmap_fig = build_analytics_heatmap(step_analytics, phases)
             phase_fig = build_phase_chart(phases, step_analytics)
 
-            analytics_df = pd.DataFrame(build_analytics_dataframe(step_analytics))
-
-            # -- Health verdict --
-            verdicts = compute_health_verdict(metrics, step_analytics)
-            verdict_html = _build_health_verdict_html(verdicts)
 
             # -- Section insight callouts --
             section_insights = _map_insights_to_sections(insights_list)
             perf_callout = _build_insight_callout_html(section_insights["performance"])
             eff_callout = _build_insight_callout_html(section_insights["efficiency"])
             tools_callout = _build_insight_callout_html(section_insights["tools"])
+
+            # -- Anomaly strip --
+            anomalies = _compute_anomalies(metrics, message_rows)
+            anomaly_html = _build_anomaly_strip_html(anomalies)
 
             # -- Raw data --
             raw_str = json.dumps(raw, indent=2, ensure_ascii=False, default=str)
@@ -398,12 +524,11 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             return (
                 steps,              # state_steps
                 banner,             # summary_banner
+                anomaly_html,       # anomaly_strip_html
                 kpi_html,           # overview_kpi_html
-                verdict_html,       # health_verdict_html
                 meta_text,          # meta_md
                 outp_text,          # output_md
                 phase_md,           # analytics_phase_md
-                insights_md,        # analytics_insights_md
                 metrics_text,       # metrics_md
                 perf_callout,       # perf_insights_html
                 tok_fig,            # token_chart
@@ -418,78 +543,50 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
                 eff_fig,            # efficiency_chart
                 tl_fig,             # tool_chart
                 tool_dur_fig,       # tool_duration_chart
-                idle_fig,           # idle_gap_chart
                 hotspots_text,      # hotspots_md
-                analytics_df,       # analytics_table
                 per_message_text,   # per_message_md
                 wf_count,           # wf_count_html
                 wf_html,            # workflow_html
-                "*Click a step card to inspect details.*",  # detail_md
+                detail_store_val,   # detail_store
+                _DETAIL_PLACEHOLDER,  # detail_html
                 raw_str,            # raw_json
             )
 
         all_outputs = [
             state_steps,              # 0
             summary_banner,           # 1
-            overview_kpi_html,        # 2
-            health_verdict_html,      # 3
+            anomaly_strip_html,       # 2
+            overview_kpi_html,        # 3
             meta_md,                  # 4
             output_md,                # 5
             analytics_phase_md,       # 6
-            analytics_insights_md,    # 7
-            metrics_md,               # 8
-            perf_insights_html,       # 9
-            token_chart,              # 10
-            duration_chart,           # 11
-            analytics_phase_chart,    # 12
-            eff_insights_html,        # 13
-            context_growth_chart,     # 14
-            analytics_heatmap,        # 15
-            cache_chart,              # 16
-            behavior_md,              # 17
-            tools_insights_html,      # 18
-            efficiency_chart,         # 19
-            tool_chart,               # 20
-            tool_duration_chart,      # 21
-            idle_gap_chart,           # 22
-            hotspots_md,              # 23
-            analytics_table,          # 24
-            per_message_md,           # 25
-            wf_count_html,            # 26
-            workflow_html,            # 27
-            detail_md,                # 28
-            raw_json,                 # 29
+            metrics_md,               # 7
+            perf_insights_html,       # 8
+            token_chart,              # 9
+            duration_chart,           # 10
+            analytics_phase_chart,    # 11
+            eff_insights_html,        # 12
+            context_growth_chart,     # 13
+            analytics_heatmap,        # 14
+            cache_chart,              # 15
+            behavior_md,              # 16
+            tools_insights_html,      # 17
+            efficiency_chart,         # 18
+            tool_chart,               # 19
+            tool_duration_chart,      # 20
+            hotspots_md,              # 21
+            per_message_md,           # 22
+            wf_count_html,            # 25
+            workflow_html,            # 26
+            detail_store,             # 27
+            detail_html,              # 29
+            raw_json,                 # 30
         ]
 
         load_btn.click(
             fn=do_load,
-            inputs=[file_dropdown, file_upload],
+            inputs=[file_upload],
             outputs=all_outputs,
-        )
-
-        # Auto-load on dropdown change
-        file_dropdown.change(
-            fn=do_load,
-            inputs=[file_dropdown, file_upload],
-            outputs=all_outputs,
-        )
-
-        # -- Step click callback --
-        def on_step_click(steps, evt: gr.EventData):
-            if not steps:
-                return "*Load a trajectory first.*"
-            try:
-                idx = int(evt.step_index)
-            except (ValueError, TypeError, AttributeError):
-                return "*Select a step from the workflow.*"
-            if idx < 0 or idx >= len(steps):
-                return f"*Step {idx} out of range.*"
-            return format_step_detail(steps[idx])
-
-        workflow_html.click(
-            fn=on_step_click,
-            inputs=[state_steps],
-            outputs=[detail_md],
         )
 
         # -- Chart toggle callback --
@@ -497,7 +594,7 @@ def build_ui(trajectory_dir: str) -> gr.Blocks:
             sa = compute_step_analytics(steps or [])
             ph = detect_phases(sa) if sa else []
             return build_token_chart(steps or [], cumulative=(mode == "Cumulative"),
-                                     step_analytics=sa, phases=ph)
+                                     phases=ph)
 
         chart_toggle.change(
             fn=on_chart_toggle,

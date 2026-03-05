@@ -182,7 +182,7 @@ def generate_insights(
             a["index"] for a in asst
             if a["tok_total"] > 0 and a["cache_ratio"] == min_cr)
         insights.append(
-            f"Cache behavior: median cache_ratio = {med_cr * 100:.1f}%. "
+            f"Cache behavior: median cache read = {med_cr * 100:.1f}%. "
             f"Lowest: step {min_step} ({min_cr * 100:.1f}%).")
 
     # 3. Slow-turn outliers (no tool waiting)
