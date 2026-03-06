@@ -212,3 +212,9 @@ workspaces/
 
 # Claude Code
 .claude/
+
+# Gradio cache
+.gradio/
+
+# OpenSpec working files
+openspec/
